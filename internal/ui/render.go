@@ -235,8 +235,10 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 
 	lines = append(lines, "")
 	if r, ok := m.io[p.Name]; ok {
-		lines = append(lines, " io   r "+zfs.NiceBytes(r.RBw)+"/s · "+opsCell(r.RBw, r.ROps)+
-			"    w "+zfs.NiceBytes(r.WBw)+"/s · "+opsCell(r.WBw, r.WOps))
+		lines = append(lines, " io   r "+elastic(m.ioW, "rbw", zfs.NiceBytes(r.RBw)+"/s")+
+			" · "+elastic(m.ioW, "rops", opsCell(r.RBw, r.ROps))+
+			"    w "+elastic(m.ioW, "wbw", zfs.NiceBytes(r.WBw)+"/s")+
+			" · "+elastic(m.ioW, "wops", opsCell(r.WBw, r.WOps)))
 	} else {
 		lines = append(lines, " io   "+styDim.Render("sampling…"))
 	}
@@ -244,15 +246,15 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 	return clampLines(lines, h)
 }
 
-// opsCell renders an ops/s figure, refusing to claim "0 ops" when bytes
+// opsCell renders an ops/s figure, refusing to claim "0 ops/s" when bytes
 // moved: zpool iostat floors sub-1.0 ops/s rates to zero (a lone aggregated
 // write in a sample window is the classic case), so bandwidth-with-zero-ops
 // really means "less than one op per second".
 func opsCell(bw, ops int64) string {
 	if ops == 0 && bw > 0 {
-		return "<1 ops"
+		return "<1 ops/s"
 	}
-	return zfs.NiceCount(ops) + " ops"
+	return zfs.NiceCount(ops) + " ops/s"
 }
 
 func strip(m *Model) string {
@@ -278,7 +280,8 @@ func strip(m *Model) string {
 		rbw += r.RBw
 		wbw += r.WBw
 	}
-	segs = append(segs, "Σ r "+zfs.NiceBytes(rbw)+"/s w "+zfs.NiceBytes(wbw)+"/s")
+	segs = append(segs, "Σ r "+elastic(m.stripW, "rbw", zfs.NiceBytes(rbw)+"/s")+
+		" w "+elastic(m.stripW, "wbw", zfs.NiceBytes(wbw)+"/s"))
 
 	scans := []string{}
 	for _, p := range m.pools {

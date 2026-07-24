@@ -31,10 +31,27 @@ type Model struct {
 	selName   string
 	expandAll bool
 	lastErr   error
+
+	// grow-only readout widths; ioW is per-pool (reset on selection change),
+	// stripW lives for the session
+	ioW    map[string]int
+	stripW map[string]int
 }
 
 func New(src collect.Source) *Model {
-	return &Model{src: src, io: map[string]zfs.IORates{}}
+	return &Model{
+		src:    src,
+		io:     map[string]zfs.IORates{},
+		ioW:    map[string]int{},
+		stripW: map[string]int{},
+	}
+}
+
+func (m *Model) setSel(name string) {
+	if name != m.selName {
+		m.selName = name
+		m.ioW = map[string]int{}
+	}
 }
 
 type poolsDataMsg struct {
@@ -132,7 +149,7 @@ func (m *Model) SetSize(w, h int) { m.w, m.h = w, h }
 func (m *Model) SetSelected(name string) {
 	for _, p := range m.pools {
 		if p.Name == name {
-			m.selName = name
+			m.setSel(name)
 		}
 	}
 }
@@ -173,19 +190,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "down", "j":
 			if i := m.selIdx(); i < len(m.pools)-1 {
-				m.selName = m.pools[i+1].Name
+				m.setSel(m.pools[i+1].Name)
 			}
 		case "up", "k":
 			if i := m.selIdx(); i > 0 {
-				m.selName = m.pools[i-1].Name
+				m.setSel(m.pools[i-1].Name)
 			}
 		case "g":
 			if len(m.pools) > 0 {
-				m.selName = m.pools[0].Name
+				m.setSel(m.pools[0].Name)
 			}
 		case "G":
 			if len(m.pools) > 0 {
-				m.selName = m.pools[len(m.pools)-1].Name
+				m.setSel(m.pools[len(m.pools)-1].Name)
 			}
 		case "t":
 			m.expandAll = !m.expandAll

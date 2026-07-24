@@ -13,6 +13,11 @@ func readFixture(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// testdata/ is gitignored (real fixtures carry hostnames and
+			// disk serials); clones without it skip rather than fail
+			t.Skipf("fixture not present in this checkout: %s", path)
+		}
 		t.Fatalf("fixture: %v", err)
 	}
 	return string(b)

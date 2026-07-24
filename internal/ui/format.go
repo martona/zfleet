@@ -52,6 +52,16 @@ func bar(pct int64, width int) string {
 	return sty.Render(strings.Repeat("▓", fill)) + styDim.Render(strings.Repeat("░", width-fill))
 }
 
+// elastic right-aligns a readout in a grow-but-not-shrink field: the field
+// remembers the widest value it has shown (per key) so live numbers flapping
+// between "0B/s" and "1.32M/s" don't shove the rest of the line around.
+func elastic(widths map[string]int, key, s string) string {
+	if n := lipgloss.Width(s); n > widths[key] {
+		widths[key] = n
+	}
+	return padL(s, widths[key])
+}
+
 // padR pads or truncates a *plain* (unstyled) string to exactly w cells.
 func padR(s string, w int) string {
 	d := w - lipgloss.Width(s)
