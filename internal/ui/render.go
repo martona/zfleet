@@ -47,7 +47,7 @@ func frame(m *Model) string {
 		return "collecting…"
 	}
 
-	contentH := m.h - 4
+	contentH := m.h - 4 // top border, divider, strip, keyed bottom border
 
 	title := func(t string, w int) string {
 		seg := " " + t + " "
@@ -80,7 +80,7 @@ func frame(m *Model) string {
 		}
 		b.WriteString("├" + rep("─", inner) + "┤\n")
 		b.WriteString("│" + fit(strip(m), inner) + "│\n")
-		b.WriteString("└" + rep("─", inner) + "┘")
+		b.WriteString(cheatBorder(m, inner))
 		return b.String()
 	}
 
@@ -132,7 +132,7 @@ func frame(m *Model) string {
 	}
 	b.WriteString("├" + rep("─", leftW) + "┴" + rep("─", rightW) + "┤\n")
 	b.WriteString("│" + fit(strip(m), m.w-2) + "│\n")
-	b.WriteString("└" + rep("─", m.w-2) + "┘")
+	b.WriteString(cheatBorder(m, m.w-2))
 	return b.String()
 }
 
