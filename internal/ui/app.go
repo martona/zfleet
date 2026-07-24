@@ -38,17 +38,20 @@ type Model struct {
 	dsPropsPend map[string]bool
 	dryCache    map[string]*dryResult // dry-run destroy results by target
 
-	pools     []*zfs.Pool
-	rootStats map[string]zfs.RootStat
-	ashift    map[string]int
-	arc       zfs.ArcStats
-	arcPrev   zfs.ArcStats
-	haveArc   bool
-	arcMap    map[string]int64 // full arcstats for the perf screen
-	hitHist   []int64          // rolling hit%×10 ring
-	io        map[string]zfs.IORates
-	ioHist    map[string][]zfs.IORates // pool-level ring for sparklines
-	ioText    string
+	pools      []*zfs.Pool
+	rootStats  map[string]zfs.RootStat
+	ashift     map[string]int
+	arc        zfs.ArcStats
+	arcPrev    zfs.ArcStats
+	haveArc    bool
+	arcMap     map[string]int64 // full arcstats for the perf screen
+	arcMapPrev map[string]int64
+	arcAt      time.Time
+	arcPrevAt  time.Time
+	hitHist    []int64 // rolling hit%×10 ring
+	io         map[string]zfs.IORates
+	ioHist     map[string][]zfs.IORates // pool-level ring for sparklines
+	ioText     string
 
 	perf perfState
 
@@ -216,7 +219,8 @@ func (m *Model) ApplyStatData(arcText, ioText, objsetText string) {
 	if strings.TrimSpace(arcText) != "" {
 		m.arcPrev = m.arc
 		m.arc = zfs.ParseArcstats(arcText)
-		m.arcMap = zfs.ParseKstatMap(arcText)
+		m.arcMapPrev, m.arcMap = m.arcMap, zfs.ParseKstatMap(arcText)
+		m.arcPrevAt, m.arcAt = m.arcAt, time.Now()
 		m.haveArc = true
 		if dh, dm := m.arc.Hits-m.arcPrev.Hits, m.arc.Misses-m.arcPrev.Misses; dh+dm > 0 {
 			m.hitHist = append(m.hitHist, 1000*dh/(dh+dm))

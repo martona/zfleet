@@ -132,6 +132,28 @@ func wrap(s string, w int) []string {
 	return out
 }
 
+// commonPrefixLen returns the length of the longest shared prefix — used to
+// strip the model/serial boilerplate sibling disks share so their rows show
+// the part that differs.
+func commonPrefixLen(names []string) int {
+	if len(names) == 0 {
+		return 0
+	}
+	p := names[0]
+	for _, n := range names[1:] {
+		limit := len(p)
+		if len(n) < limit {
+			limit = len(n)
+		}
+		i := 0
+		for i < limit && p[i] == n[i] {
+			i++
+		}
+		p = p[:i]
+	}
+	return len(p)
+}
+
 // truncate shortens a plain string to w cells, keeping head and tail with a
 // middle ellipsis — device names carry their identity at both ends.
 func truncate(s string, w int) string {

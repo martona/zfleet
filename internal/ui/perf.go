@@ -33,9 +33,14 @@ type perfState struct {
 	zilPrev   map[string]int64
 	params    map[string]int64
 	lat       map[string]zfs.VdevLat
+	latHist   map[string][]zfs.VdevLat // per-device ring; windowed view
 	err       string
 	have      bool
 }
+
+// ~60s of samples at the 2s tick — enough to separate a persistent
+// straggler from rotating GC noise.
+const perfLatHistLen = 30
 
 type perfMsg struct {
 	pool   string
@@ -123,6 +128,8 @@ func (m *Model) perfKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.perfCycle(1)
 	case "shift+tab", "left", "h":
 		return m, m.perfCycle(-1)
+	case "t":
+		m.expandAll = !m.expandAll // force leaf disks in the latency table
 	}
 	return m, nil
 }
@@ -144,7 +151,59 @@ func (m *Model) applyPerf(msg perfMsg) {
 		m.perf.params = p
 	}
 	m.perf.lat = zfs.ParseIostatLatency(msg.iostat, m.perf.pool, m.poolNames())
+	if m.perf.latHist == nil {
+		m.perf.latHist = map[string][]zfs.VdevLat{}
+	}
+	for name, l := range m.perf.lat {
+		ring := append(m.perf.latHist[name], l)
+		if len(ring) > perfLatHistLen {
+			ring = ring[1:]
+		}
+		m.perf.latHist[name] = ring
+	}
 	m.perf.have = true
+}
+
+// latWindow averages a device's ring per column (idle "-" samples excluded)
+// and returns the worst single-sample write-total as the peak.
+func (m *Model) latWindow(name string) (avg zfs.VdevLat, peakW int64, samples int) {
+	ring := m.perf.latHist[name]
+	none := zfs.VdevLat{TotalR: -1, TotalW: -1, DiskR: -1, DiskW: -1,
+		SyncQR: -1, SyncQW: -1, AsyncQR: -1, AsyncQW: -1}
+	if len(ring) == 0 {
+		return none, -1, 0
+	}
+	mean := func(get func(zfs.VdevLat) int64) int64 {
+		var sum int64
+		n := 0
+		for _, s := range ring {
+			if v := get(s); v >= 0 {
+				sum += v
+				n++
+			}
+		}
+		if n == 0 {
+			return -1
+		}
+		return sum / int64(n)
+	}
+	avg = zfs.VdevLat{
+		TotalR:  mean(func(s zfs.VdevLat) int64 { return s.TotalR }),
+		TotalW:  mean(func(s zfs.VdevLat) int64 { return s.TotalW }),
+		DiskR:   mean(func(s zfs.VdevLat) int64 { return s.DiskR }),
+		DiskW:   mean(func(s zfs.VdevLat) int64 { return s.DiskW }),
+		SyncQR:  mean(func(s zfs.VdevLat) int64 { return s.SyncQR }),
+		SyncQW:  mean(func(s zfs.VdevLat) int64 { return s.SyncQW }),
+		AsyncQR: mean(func(s zfs.VdevLat) int64 { return s.AsyncQR }),
+		AsyncQW: mean(func(s zfs.VdevLat) int64 { return s.AsyncQW }),
+	}
+	peakW = -1
+	for _, s := range ring {
+		if s.TotalW > peakW {
+			peakW = s.TotalW
+		}
+	}
+	return avg, peakW, len(ring)
 }
 
 // EnterPerfFor opens the perf screen on a named pool (dump helper).
@@ -163,6 +222,22 @@ func (m *Model) EnterPerfFor(pool string) bool {
 func (m *Model) ApplyPerf(pool, txgs, dmuTx, zil, params, iostat string, err error) {
 	m.applyPerf(perfMsg{pool: pool, txgs: txgs, dmuTx: dmuTx, zil: zil,
 		params: params, iostat: iostat, err: err})
+}
+
+// arcRate computes a per-second delta for an arcstats counter.
+func (m *Model) arcRate(key string) float64 {
+	if m.arcMapPrev == nil {
+		return 0
+	}
+	dt := m.arcAt.Sub(m.arcPrevAt).Seconds()
+	if dt <= 0 {
+		return 0
+	}
+	d := m.arcMap[key] - m.arcMapPrev[key]
+	if d < 0 {
+		return 0
+	}
+	return float64(d) / dt
 }
 
 // perfRate computes a per-second delta for a counter across the last two
