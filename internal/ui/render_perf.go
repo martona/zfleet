@@ -84,7 +84,7 @@ func perfPane(m *Model, w, h int) []string {
 	slogLatW := int64(-1)
 	if hasSlog {
 		for _, v := range perfPool.Class("logs").Vdevs {
-			if lat, ok := m.perf.lat[v.Name]; ok {
+			if lat, _, n := m.latWindow(v.Name); n > 0 {
 				slogLatW = lat.TotalW
 			}
 		}

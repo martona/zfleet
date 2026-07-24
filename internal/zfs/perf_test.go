@@ -54,6 +54,26 @@ func TestParseIostatLatency(t *testing.T) {
 	}
 }
 
+func TestOpWeightedLat(t *testing.T) {
+	samples := []VdevLat{
+		{WOps: 3, TotalW: 30e6},    // sparse burst: 3 ops at 30ms
+		{WOps: 10000, TotalW: 4e5}, // steady: 10k ops at 400µs
+		{WOps: 0, TotalW: -1},      // idle interval: must not count
+		{ROps: 0, TotalR: -1, WOps: 0, TotalW: -1},
+	}
+	got := OpWeightedLat(samples)
+	// op-weighted ≈ 409µs; equal-interval would claim ~15ms
+	if got.TotalW < 4e5 || got.TotalW > 5e5 {
+		t.Errorf("TotalW = %d ns, want ~409µs", got.TotalW)
+	}
+	if got.TotalR != -1 {
+		t.Errorf("TotalR = %d, want -1 (no read ops anywhere)", got.TotalR)
+	}
+	if got.WOps != 10003 {
+		t.Errorf("WOps sum = %d, want 10003", got.WOps)
+	}
+}
+
 func TestNiceNS(t *testing.T) {
 	cases := map[int64]string{
 		-1: "-", 850: "850ns", 12000: "12.0µs", 1700000: "1.70ms",

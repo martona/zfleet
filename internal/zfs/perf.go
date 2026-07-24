@@ -132,8 +132,10 @@ func ParseParams(text string) map[string]int64 {
 }
 
 // VdevLat is one row of `zpool iostat -Hpvly`: latencies in ns, -1 when the
-// interval saw no io ("-").
+// interval saw no io ("-"), plus the interval's op counts — the weights
+// that make window averaging honest.
 type VdevLat struct {
+	ROps, WOps       int64
 	TotalR, TotalW   int64
 	DiskR, DiskW     int64
 	SyncQR, SyncQW   int64
@@ -175,11 +177,51 @@ func ParseIostatLatency(text, pool string, poolNames map[string]bool) map[string
 			continue
 		}
 		out[f[0]] = VdevLat{
+			ROps: parseI64(f[3]), WOps: parseI64(f[4]),
 			TotalR: parseI64(f[7]), TotalW: parseI64(f[8]),
 			DiskR: parseI64(f[9]), DiskW: parseI64(f[10]),
 			SyncQR: parseI64(f[11]), SyncQW: parseI64(f[12]),
 			AsyncQR: parseI64(f[13]), AsyncQW: parseI64(f[14]),
 		}
+	}
+	return out
+}
+
+// OpWeightedLat averages latency samples weighted by each interval's op
+// count — an interval with three slow ops must not outvote one with ten
+// thousand fast ones, which is exactly what equal-interval averaging does
+// to sparsely-bursting drives. Columns with no ops anywhere return -1.
+func OpWeightedLat(samples []VdevLat) VdevLat {
+	avg := func(pick func(VdevLat) int64, weight func(VdevLat) int64) int64 {
+		var num, den float64
+		for _, s := range samples {
+			l, w := pick(s), weight(s)
+			if l < 0 || w <= 0 {
+				continue
+			}
+			num += float64(l) * float64(w)
+			den += float64(w)
+		}
+		if den == 0 {
+			return -1
+		}
+		return int64(num / den)
+	}
+	r := func(s VdevLat) int64 { return s.ROps }
+	w := func(s VdevLat) int64 { return s.WOps }
+	out := VdevLat{
+		TotalR:  avg(func(s VdevLat) int64 { return s.TotalR }, r),
+		TotalW:  avg(func(s VdevLat) int64 { return s.TotalW }, w),
+		DiskR:   avg(func(s VdevLat) int64 { return s.DiskR }, r),
+		DiskW:   avg(func(s VdevLat) int64 { return s.DiskW }, w),
+		SyncQR:  avg(func(s VdevLat) int64 { return s.SyncQR }, r),
+		SyncQW:  avg(func(s VdevLat) int64 { return s.SyncQW }, w),
+		AsyncQR: avg(func(s VdevLat) int64 { return s.AsyncQR }, r),
+		AsyncQW: avg(func(s VdevLat) int64 { return s.AsyncQW }, w),
+	}
+	for _, s := range samples {
+		out.ROps += s.ROps
+		out.WOps += s.WOps
 	}
 	return out
 }

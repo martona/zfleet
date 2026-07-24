@@ -164,39 +164,18 @@ func (m *Model) applyPerf(msg perfMsg) {
 	m.perf.have = true
 }
 
-// latWindow averages a device's ring per column (idle "-" samples excluded)
-// and returns the worst single-sample write-total as the peak.
+// latWindow reduces a device's ring to op-weighted column averages — each
+// interval votes with its op count, so three slow ops in a quiet second
+// can't outvote ten thousand fast ones (equal-interval averaging slanders
+// sparse-burst drives). The worst single-sample write-total stays as the
+// peak, un-averaged on purpose.
 func (m *Model) latWindow(name string) (avg zfs.VdevLat, peakW int64, samples int) {
 	ring := m.perf.latHist[name]
-	none := zfs.VdevLat{TotalR: -1, TotalW: -1, DiskR: -1, DiskW: -1,
-		SyncQR: -1, SyncQW: -1, AsyncQR: -1, AsyncQW: -1}
 	if len(ring) == 0 {
-		return none, -1, 0
+		return zfs.VdevLat{TotalR: -1, TotalW: -1, DiskR: -1, DiskW: -1,
+			SyncQR: -1, SyncQW: -1, AsyncQR: -1, AsyncQW: -1}, -1, 0
 	}
-	mean := func(get func(zfs.VdevLat) int64) int64 {
-		var sum int64
-		n := 0
-		for _, s := range ring {
-			if v := get(s); v >= 0 {
-				sum += v
-				n++
-			}
-		}
-		if n == 0 {
-			return -1
-		}
-		return sum / int64(n)
-	}
-	avg = zfs.VdevLat{
-		TotalR:  mean(func(s zfs.VdevLat) int64 { return s.TotalR }),
-		TotalW:  mean(func(s zfs.VdevLat) int64 { return s.TotalW }),
-		DiskR:   mean(func(s zfs.VdevLat) int64 { return s.DiskR }),
-		DiskW:   mean(func(s zfs.VdevLat) int64 { return s.DiskW }),
-		SyncQR:  mean(func(s zfs.VdevLat) int64 { return s.SyncQR }),
-		SyncQW:  mean(func(s zfs.VdevLat) int64 { return s.SyncQW }),
-		AsyncQR: mean(func(s zfs.VdevLat) int64 { return s.AsyncQR }),
-		AsyncQW: mean(func(s zfs.VdevLat) int64 { return s.AsyncQW }),
-	}
+	avg = zfs.OpWeightedLat(ring)
 	peakW = -1
 	for _, s := range ring {
 		if s.TotalW > peakW {
