@@ -57,13 +57,20 @@ func frame(m *Model) string {
 		return "─" + seg + rep("─", w-1-lipgloss.Width(seg))
 	}
 
-	// cursor on the overview row: the inspector dissolves and the tree
-	// renders full-width with io columns
-	if m.mode == modePools && m.treeSelected().kind == rOverview {
+	// full-width presentations: the performance dashboard, or the tree
+	// with the cursor on the overview row
+	if m.mode == modePerf || (m.mode == modePools && m.treeSelected().kind == rOverview) {
 		inner := m.w - 2
-		lines := overviewPane(m, inner, contentH)
+		var lines []string
+		heading := "overview"
+		if m.mode == modePerf {
+			heading = "performance · " + m.perf.pool
+			lines = perfPane(m, inner, contentH)
+		} else {
+			lines = overviewPane(m, inner, contentH)
+		}
 		var b strings.Builder
-		b.WriteString("┌" + title("overview", inner) + "┐\n")
+		b.WriteString("┌" + title(heading, inner) + "┐\n")
 		for i := 0; i < contentH; i++ {
 			l := ""
 			if i < len(lines) {

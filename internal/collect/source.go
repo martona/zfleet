@@ -38,6 +38,10 @@ type Source interface {
 	// ("ds@a,b,c") and returns its output. The -n flag is hardcoded; this
 	// never destroys anything.
 	DestroyDryRun(ctx context.Context, target string) (string, error)
+	// PerfTexts returns the performance-screen surfaces for one pool:
+	// txgs ring, dmu_tx counters, zil counters, module params, and a
+	// per-vdev latency iostat sample.
+	PerfTexts(ctx context.Context, pool string) (txgs, dmuTx, zil, params, iostatL string, err error)
 	// PoolProps returns `zpool get -Hp ashift` output.
 	PoolProps(ctx context.Context) (string, error)
 	Name() string
@@ -114,6 +118,29 @@ func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {
 	// args are passed as a vector (no shell), and -n is pinned here
 	out, err := exec.CommandContext(ctx, "zfs", "destroy", "-n", "-v", target).CombinedOutput()
 	return string(out), err
+}
+
+func (Exec) PerfTexts(ctx context.Context, pool string) (string, string, string, string, string, error) {
+	readFile := func(p string) string {
+		b, _ := os.ReadFile(p)
+		return string(b)
+	}
+	txgs := readFile("/proc/spl/kstat/zfs/" + pool + "/txgs")
+	dmuTx := readFile("/proc/spl/kstat/zfs/dmu_tx")
+	// newer kmods have per-pool zil kstats; fall back to the global one
+	zil := readFile("/proc/spl/kstat/zfs/" + pool + "/zil")
+	if strings.TrimSpace(zil) == "" {
+		zil = readFile("/proc/spl/kstat/zfs/zil")
+	}
+	var params strings.Builder
+	for _, p := range []string{"zfs_dirty_data_max", "zfs_delay_min_dirty_percent", "zfs_dirty_data_sync_percent"} {
+		full := "/sys/module/zfs/parameters/" + p
+		if b, err := os.ReadFile(full); err == nil {
+			params.WriteString(full + ":" + strings.TrimSpace(string(b)) + "\n")
+		}
+	}
+	iostat, err := exec.CommandContext(ctx, "zpool", "iostat", "-Hpvly", pool, "1", "1").Output()
+	return txgs, dmuTx, zil, params.String(), string(iostat), err
 }
 
 // Replay serves recorded fixture files from a directory, so the TUI runs
@@ -199,4 +226,16 @@ func (r Replay) PoolProps(context.Context) (string, error) {
 
 func (Replay) DestroyDryRun(context.Context, string) (string, error) {
 	return "", errors.New("dry-run needs a live system")
+}
+
+func (r Replay) PerfTexts(_ context.Context, pool string) (string, string, string, string, string, error) {
+	txgs, err := r.read("txgs-" + pool + ".out")
+	if err != nil {
+		return "", "", "", "", "", err
+	}
+	dmuTx, _ := r.read("dmu-tx.out")
+	zil, _ := r.read("zil.out")
+	params, _ := r.read("zfs-params.out")
+	iostat, _ := r.read("zpool-iostat-Hpvly.out")
+	return txgs, dmuTx, zil, params, iostat, nil
 }

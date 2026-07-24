@@ -27,6 +27,7 @@ func main() {
 	cursor := flag.String("cursor", "", "row to select within --browse (child base name or @snap)")
 	expand := flag.String("expand", "", "comma-separated pools/datasets to unfold for --dump tree views")
 	mark := flag.String("mark", "", "comma-separated snapshot names to select within --browse (dump)")
+	perf := flag.String("perf", "", "pool whose performance screen to render for --dump")
 	flag.Parse()
 
 	var src collect.Source
@@ -135,6 +136,18 @@ func main() {
 						m.ApplyProps(ds, propText)
 					}
 				}
+			}
+		}
+		if *perf != "" {
+			if !m.EnterPerfFor(*perf) {
+				fail("pool not found: " + *perf)
+			}
+			txgs, dmuTx, zil, params, iostat, err := src.PerfTexts(ctx, *perf)
+			m.ApplyPerf(*perf, txgs, dmuTx, zil, params, iostat, err)
+			if !strings.HasPrefix(src.Name(), "replay") {
+				time.Sleep(1200 * time.Millisecond)
+				txgs, dmuTx, zil, params, iostat, err = src.PerfTexts(ctx, *perf)
+				m.ApplyPerf(*perf, txgs, dmuTx, zil, params, iostat, err)
 			}
 		}
 		m.SetSize(*width, *height)

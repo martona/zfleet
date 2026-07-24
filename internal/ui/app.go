@@ -44,9 +44,13 @@ type Model struct {
 	arc       zfs.ArcStats
 	arcPrev   zfs.ArcStats
 	haveArc   bool
+	arcMap    map[string]int64 // full arcstats for the perf screen
+	hitHist   []int64          // rolling hit%×10 ring
 	io        map[string]zfs.IORates
 	ioHist    map[string][]zfs.IORates // pool-level ring for sparklines
 	ioText    string
+
+	perf perfState
 
 	// per-dataset io from objset kstat deltas
 	dsIO       map[string]zfs.IORates
@@ -212,7 +216,14 @@ func (m *Model) ApplyStatData(arcText, ioText, objsetText string) {
 	if strings.TrimSpace(arcText) != "" {
 		m.arcPrev = m.arc
 		m.arc = zfs.ParseArcstats(arcText)
+		m.arcMap = zfs.ParseKstatMap(arcText)
 		m.haveArc = true
+		if dh, dm := m.arc.Hits-m.arcPrev.Hits, m.arc.Misses-m.arcPrev.Misses; dh+dm > 0 {
+			m.hitHist = append(m.hitHist, 1000*dh/(dh+dm))
+			if len(m.hitHist) > dsIOHistLen {
+				m.hitHist = m.hitHist[len(m.hitHist)-dsIOHistLen:]
+			}
+		}
 	}
 	m.ioText = ioText
 	if len(m.pools) > 0 {
@@ -391,11 +402,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyMsg:
-		if m.mode == modeBrowser {
-			return m.browserKeys(msg)
+	case perfMsg:
+		m.applyPerf(msg)
+		return m, nil
+
+	case perfTickMsg:
+		if m.mode != modePerf {
+			return m, nil
 		}
-		return m.treeKeys(msg)
+		return m, tea.Batch(fetchPerf(m.src, m.perf.pool),
+			tea.Tick(perfInterval, func(time.Time) tea.Msg { return perfTickMsg{} }))
+
+	case tea.KeyMsg:
+		switch m.mode {
+		case modePerf:
+			return m.perfKeys(msg)
+		case modeBrowser:
+			if msg.String() == "p" && !m.br.filterIn {
+				return m, m.enterPerf()
+			}
+			return m.browserKeys(msg)
+		default:
+			if msg.String() == "p" {
+				return m, m.enterPerf()
+			}
+			return m.treeKeys(msg)
+		}
 	}
 	return m, nil
 }
