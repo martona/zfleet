@@ -92,6 +92,9 @@ func frame(m *Model) string {
 		leftTitle = m.breadcrumb()
 		bsel := m.brSelected()
 		rightTitle = brRightTitle(bsel)
+		if n := len(m.br.selSnaps); n > 0 {
+			rightTitle = fmt.Sprintf("selection (%d)", n)
+		}
 		left = brLeftPane(m, leftW, contentH)
 		right = brInspector(m, bsel, rightW, contentH)
 	} else {

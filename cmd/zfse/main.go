@@ -26,6 +26,7 @@ func main() {
 	browse := flag.String("browse", "", "dataset whose browser level to render for --dump")
 	cursor := flag.String("cursor", "", "row to select within --browse (child base name or @snap)")
 	expand := flag.String("expand", "", "comma-separated pools/datasets to unfold for --dump tree views")
+	mark := flag.String("mark", "", "comma-separated snapshot names to select within --browse (dump)")
 	flag.Parse()
 
 	var src collect.Source
@@ -111,9 +112,20 @@ func main() {
 			if propText, err := src.PropTexts(ctx, *browse); err == nil {
 				m.ApplyProps(*browse, propText)
 			}
+			if *mark != "" {
+				m.MarkSnaps(strings.Split(*mark, ","))
+				if target := m.SelectionTarget(); target != "" {
+					text, err := src.DestroyDryRun(ctx, target)
+					m.ApplyDryRun(target, text, err)
+				}
+			}
 			if *cursor != "" {
 				if !m.SetCursorRow(*cursor) {
 					fail("row not found at this level: " + *cursor)
+				}
+				if target := m.SelectedFamTarget(); target != "" {
+					text, err := src.DestroyDryRun(ctx, target)
+					m.ApplyDryRun(target, text, err)
 				}
 				if ds := m.SelectedDatasetName(); ds != "" && ds != *browse {
 					if snapText, err := src.SnapshotTexts(ctx, ds); err == nil {

@@ -33,6 +33,15 @@ type brLevel struct {
 	cursor string // row identity, restored when returning to this level
 }
 
+// dryResult caches one `zfs destroy -nv` output, keyed by its exact target
+// string — a changed selection or snapshot set is a different key, so the
+// cache self-invalidates.
+type dryResult struct {
+	text    string
+	errText string
+	pending bool
+}
+
 type browserState struct {
 	pool     string
 	stack    []brLevel
@@ -40,12 +49,18 @@ type browserState struct {
 	sortUsed bool
 	filter   string
 	filterIn bool
+
+	// snapshot multi-select, scoped to the current level; cleared on any
+	// level change so there is never an undo fight
+	selSnaps map[string]bool // snap short names within the container
+	selGen   int             // bumped per change; debounces the dry-run
 }
 
 func newBrowserState(pool string) browserState {
 	return browserState{
 		pool:     pool,
 		expFams:  map[string]bool{},
+		selSnaps: map[string]bool{},
 		sortUsed: true,
 	}
 }
@@ -67,11 +82,12 @@ const (
 )
 
 type brEntry struct {
-	kind int
-	ds   *zfs.Dataset
-	fam  *zfs.SnapFamily
-	snap *zfs.Snapshot
-	id   string
+	kind   int
+	ds     *zfs.Dataset
+	fam    *zfs.SnapFamily
+	snap   *zfs.Snapshot
+	id     string
+	member bool // snapshot shown scattered from an expanded family
 }
 
 func (m *Model) brContainer() *zfs.Dataset {
@@ -105,26 +121,50 @@ func (m *Model) brEntries() []brEntry {
 		}
 	}
 
-	snapEntries := zfs.GroupSnapshots(m.dsSnaps[c.Name], familyMinSize)
-	if m.br.sortUsed {
-		sort.SliceStable(snapEntries, func(i, j int) bool { return snapEntries[i].Used() > snapEntries[j].Used() })
+	// snapshots are strictly chronological: a family row sits at the slot
+	// its earliest member earned; expanding it scatters the members to
+	// their own chronological positions among the named snapshots
+	type cand struct {
+		t int64
+		e brEntry
 	}
-	for _, e := range snapEntries {
+	var cands []cand
+	for _, e := range zfs.GroupSnapshots(m.dsSnaps[c.Name], familyMinSize) {
 		if e.Fam != nil {
 			if !match(e.Fam.Label()) {
 				continue
 			}
-			out = append(out, brEntry{kind: eFam, fam: e.Fam, id: "@" + e.Fam.Label()})
+			cands = append(cands, cand{e.Fam.Oldest().Creation,
+				brEntry{kind: eFam, fam: e.Fam, id: "@" + e.Fam.Label()}})
 			if m.br.expFams[c.Name+"\x00"+e.Fam.Label()] {
 				for _, s := range e.Fam.Snaps {
-					out = append(out, brEntry{kind: eSnap, snap: s, id: "@" + s.Snap})
+					cands = append(cands, cand{s.Creation,
+						brEntry{kind: eSnap, snap: s, id: "@" + s.Snap, member: true}})
 				}
 			}
 		} else if match(e.Snap.Snap) {
-			out = append(out, brEntry{kind: eSnap, snap: e.Snap, id: "@" + e.Snap.Snap})
+			cands = append(cands, cand{e.Snap.Creation,
+				brEntry{kind: eSnap, snap: e.Snap, id: "@" + e.Snap.Snap}})
 		}
 	}
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].t < cands[j].t })
+	for _, cd := range cands {
+		out = append(out, cd.e)
+	}
 	return out
+}
+
+// famTarget builds the dry-run target for a whole family.
+func (m *Model) famTarget(f *zfs.SnapFamily) string {
+	c := m.brContainer()
+	if c == nil || len(f.Snaps) == 0 {
+		return ""
+	}
+	names := make([]string, len(f.Snaps))
+	for i, s := range f.Snaps {
+		names[i] = s.Snap
+	}
+	return c.Name + "@" + strings.Join(names, ",")
 }
 
 func (m *Model) brCursorIdx(entries []brEntry) int {
@@ -164,7 +204,15 @@ func (m *Model) brMove(delta int) {
 	m.brSetCursorID(e[i].id)
 }
 
+func (m *Model) brClearSelection() {
+	if len(m.br.selSnaps) > 0 {
+		m.br.selSnaps = map[string]bool{}
+		m.br.selGen++
+	}
+}
+
 func (m *Model) brUp() {
+	m.brClearSelection()
 	if len(m.br.stack) > 1 {
 		m.br.stack = m.br.stack[:len(m.br.stack)-1]
 	} else {
@@ -174,8 +222,70 @@ func (m *Model) brUp() {
 }
 
 func (m *Model) brDescend(ds *zfs.Dataset) {
+	m.brClearSelection()
 	m.br.stack = append(m.br.stack, brLevel{name: ds.Name, cursor: "·"})
 	m.br.filter, m.br.filterIn = "", false
+}
+
+// brToggleSel toggles selection on the current row: a snapshot toggles
+// itself, a family toggles all members together.
+func (m *Model) brToggleSel() bool {
+	switch sel := m.brSelected(); sel.kind {
+	case eSnap:
+		if m.br.selSnaps[sel.snap.Snap] {
+			delete(m.br.selSnaps, sel.snap.Snap)
+		} else {
+			m.br.selSnaps[sel.snap.Snap] = true
+		}
+	case eFam:
+		all := true
+		for _, s := range sel.fam.Snaps {
+			if !m.br.selSnaps[s.Snap] {
+				all = false
+				break
+			}
+		}
+		for _, s := range sel.fam.Snaps {
+			if all {
+				delete(m.br.selSnaps, s.Snap)
+			} else {
+				m.br.selSnaps[s.Snap] = true
+			}
+		}
+	default:
+		return false
+	}
+	m.br.selGen++
+	return true
+}
+
+// brSelection returns the selected snapshots in chronological order,
+// intersected with the container's current snapshot list.
+func (m *Model) brSelection() []*zfs.Snapshot {
+	c := m.brContainer()
+	if c == nil || len(m.br.selSnaps) == 0 {
+		return nil
+	}
+	var out []*zfs.Snapshot
+	for _, s := range m.dsSnaps[c.Name] {
+		if m.br.selSnaps[s.Snap] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// SelectionTarget builds the `zfs destroy -n` argument ("ds@a,b,c").
+func (m *Model) SelectionTarget() string {
+	sel := m.brSelection()
+	if len(sel) == 0 {
+		return ""
+	}
+	names := make([]string, len(sel))
+	for i, s := range sel {
+		names[i] = s.Snap
+	}
+	return m.brContainer().Name + "@" + strings.Join(names, ",")
 }
 
 // enterBrowserAt opens the drill browser at a dataset path (a bare pool
@@ -224,6 +334,19 @@ func (m *Model) ensurePropsCmd(name string) tea.Cmd {
 	return fetchProps(m.src, name)
 }
 
+// ensureDryCmd runs a dry-run destroy for a target once, caching forever —
+// the target string embeds the exact snapshot set, so changes mint new keys.
+func (m *Model) ensureDryCmd(target string) tea.Cmd {
+	if target == "" {
+		return nil
+	}
+	if _, ok := m.dryCache[target]; ok {
+		return nil
+	}
+	m.dryCache[target] = &dryResult{pending: true}
+	return fetchDryRun(m.src, target)
+}
+
 // brEnsure requests any lazy data the current view is missing.
 func (m *Model) brEnsure() tea.Cmd {
 	c := m.brContainer()
@@ -231,8 +354,12 @@ func (m *Model) brEnsure() tea.Cmd {
 		return nil
 	}
 	cmds := []tea.Cmd{m.ensureSnapsCmd(c.Name)}
-	if sel := m.brSelected(); sel.ds != nil {
+	switch sel := m.brSelected(); {
+	case sel.ds != nil:
 		cmds = append(cmds, m.ensureSnapsCmd(sel.ds.Name), m.ensurePropsCmd(sel.ds.Name))
+	case sel.kind == eFam:
+		// don't tell the user a dry-run is needed — just run it
+		cmds = append(cmds, m.ensureDryCmd(m.famTarget(sel.fam)))
 	}
 	return tea.Batch(cmds...)
 }
@@ -284,17 +411,42 @@ func (m *Model) browserKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "backspace", "left", "h":
 		m.brUp()
 	case "esc":
-		if m.br.filter != "" {
+		switch {
+		case len(m.br.selSnaps) > 0:
+			m.brClearSelection()
+		case m.br.filter != "":
 			m.br.filter = ""
-		} else {
+		default:
 			m.brUp()
 		}
 	case "s":
 		m.br.sortUsed = !m.br.sortUsed
 	case "/":
 		m.br.filterIn = true
+	case " ":
+		if m.brToggleSel() {
+			m.brMove(1)
+			return m, tea.Batch(m.brEnsure(), m.brDryRunDebounce())
+		}
+	case "shift+down":
+		if m.brToggleSel() {
+			m.brMove(1)
+			return m, tea.Batch(m.brEnsure(), m.brDryRunDebounce())
+		}
+	case "shift+up":
+		if m.brToggleSel() {
+			m.brMove(-1)
+			return m, tea.Batch(m.brEnsure(), m.brDryRunDebounce())
+		}
 	}
 	return m, m.brEnsure()
+}
+
+// brDryRunDebounce schedules the reclaim computation a beat after the last
+// selection change, so spacebar streaks cost one exec, not one per press.
+func (m *Model) brDryRunDebounce() tea.Cmd {
+	gen := m.br.selGen
+	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dryTickMsg{gen: gen} })
 }
 
 // messages and fetch commands
@@ -315,6 +467,21 @@ type propsMsg struct {
 	err  error
 }
 type datasetsTickMsg struct{}
+type dryTickMsg struct{ gen int }
+type dryRunMsg struct {
+	target string
+	text   string
+	err    error
+}
+
+func fetchDryRun(src collect.Source, target string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		text, err := src.DestroyDryRun(ctx, target)
+		return dryRunMsg{target: target, text: text, err: err}
+	}
+}
 
 func fetchDatasets(src collect.Source, pool string) tea.Cmd {
 	return func() tea.Msg {
@@ -381,6 +548,15 @@ func (m *Model) BrowseTo(path string) bool {
 	}
 	m.mode = modeBrowser
 	return true
+}
+
+// SelectedFamTarget returns the dry-run target when the cursor rests on a
+// family row (for --dump prefetching).
+func (m *Model) SelectedFamTarget() string {
+	if sel := m.brSelected(); sel.kind == eFam {
+		return m.famTarget(sel.fam)
+	}
+	return ""
 }
 
 // SelectedDatasetName returns the full name of the selected dataset row, or

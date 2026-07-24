@@ -14,6 +14,7 @@ var (
 	styBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	styDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styBold    = lipgloss.NewStyle().Bold(true)
+	styInv     = lipgloss.NewStyle().Reverse(true) // the mc cursor bar
 	styBar     = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	styBarWarn = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styBarBad  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))

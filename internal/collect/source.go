@@ -6,6 +6,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,10 @@ type Source interface {
 	// RootTexts returns `zfs list -Hp -d 0 -o name,used,logicalused` —
 	// per-pool charged vs logical totals.
 	RootTexts(ctx context.Context) (string, error)
+	// DestroyDryRun runs `zfs destroy -n -v` on a snapshot list
+	// ("ds@a,b,c") and returns its output. The -n flag is hardcoded; this
+	// never destroys anything.
+	DestroyDryRun(ctx context.Context, target string) (string, error)
 	// PoolProps returns `zpool get -Hp ashift` output.
 	PoolProps(ctx context.Context) (string, error)
 	Name() string
@@ -102,6 +107,12 @@ func (Exec) RootTexts(ctx context.Context) (string, error) {
 
 func (Exec) PoolProps(ctx context.Context) (string, error) {
 	out, err := exec.CommandContext(ctx, "zpool", "get", "-Hp", "ashift").Output()
+	return string(out), err
+}
+
+func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {
+	// args are passed as a vector (no shell), and -n is pinned here
+	out, err := exec.CommandContext(ctx, "zfs", "destroy", "-n", "-v", target).CombinedOutput()
 	return string(out), err
 }
 
@@ -184,4 +195,8 @@ func (r Replay) RootTexts(context.Context) (string, error) {
 
 func (r Replay) PoolProps(context.Context) (string, error) {
 	return r.read("zpool-ashift.out") // absent in pre-v2 fixture dirs
+}
+
+func (Replay) DestroyDryRun(context.Context, string) (string, error) {
+	return "", errors.New("dry-run needs a live system")
 }

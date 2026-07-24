@@ -36,6 +36,7 @@ type Model struct {
 	dsSnapsPend map[string]bool
 	dsProps     map[string]map[string]zfs.Prop
 	dsPropsPend map[string]bool
+	dryCache    map[string]*dryResult // dry-run destroy results by target
 
 	pools     []*zfs.Pool
 	rootStats map[string]zfs.RootStat
@@ -75,6 +76,7 @@ func New(src collect.Source) *Model {
 		dsSnapsPend:  map[string]bool{},
 		dsProps:      map[string]map[string]zfs.Prop{},
 		dsPropsPend:  map[string]bool{},
+		dryCache:     map[string]*dryResult{},
 		rootStats:    map[string]zfs.RootStat{},
 		ashift:       map[string]int{},
 		io:           map[string]zfs.IORates{},
@@ -373,6 +375,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case dryTickMsg:
+		if msg.gen == m.br.selGen && len(m.br.selSnaps) > 0 {
+			return m, m.ensureDryCmd(m.SelectionTarget())
+		}
+		return m, nil
+
+	case dryRunMsg:
+		if r := m.dryCache[msg.target]; r != nil {
+			r.pending = false
+			r.text = msg.text
+			if msg.err != nil {
+				r.errText = msg.err.Error()
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.mode == modeBrowser {
 			return m.browserKeys(msg)
@@ -380,6 +398,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.treeKeys(msg)
 	}
 	return m, nil
+}
+
+// MarkSnaps selects snapshots on the current browser level (dump helper).
+func (m *Model) MarkSnaps(names []string) {
+	for _, n := range names {
+		n = strings.TrimSpace(strings.TrimPrefix(n, "@"))
+		if n != "" {
+			m.br.selSnaps[n] = true
+		}
+	}
+	m.br.selGen++
+}
+
+// ApplyDryRun stores a dry-run result for a target (dump helper).
+func (m *Model) ApplyDryRun(target, text string, err error) {
+	r := &dryResult{text: text}
+	if err != nil {
+		r.errText = err.Error()
+	}
+	m.dryCache[target] = r
 }
 
 func (m *Model) View() string {

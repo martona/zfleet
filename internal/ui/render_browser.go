@@ -21,6 +21,9 @@ func (m *Model) breadcrumb() string {
 			crumb += "▏"
 		}
 	}
+	if n := len(m.br.selSnaps); n > 0 {
+		crumb += fmt.Sprintf(" · %d sel", n)
+	}
 	return crumb
 }
 
@@ -39,39 +42,82 @@ func brLeftPane(m *Model, w, h int) []string {
 	}
 	var lines []string
 	for i, e := range entries {
-		marker := "  "
-		if i == cur {
-			marker = "▸ "
-		}
+		onCur := i == cur
 		var row string
 		switch e.kind {
 		case eSelf:
-			row = marker + "· " + styBold.Render(padR(truncate(e.ds.Base(), nameW+4), nameW+4)) +
-				" " + padL(zfs.NiceBytes(e.ds.Used), 7)
+			// leftmost row of the level: the container out-dents its own
+			// snapshots and children, never the other way around
+			name := e.ds.Base()
+			if e.ds.IsVolume() {
+				name += " v"
+			}
+			body := padR(truncate(name, nameW+6), nameW+6) + " " + padL(zfs.NiceBytes(e.ds.Used), 7)
+			if onCur {
+				row = styInv.Render(padR("▸ "+body, w))
+			} else {
+				row = "  " + styBold.Render(body)
+			}
 		case eChild:
 			name := e.ds.Base()
 			if len(e.ds.Children) > 0 {
 				name += "/"
 			} else if e.ds.IsVolume() {
-				name = truncate(name, nameW-2) + " " + styDim.Render("v")
+				name = truncate(name, nameW-2) + " v"
 			}
 			share := int64(-1)
 			if c.Used > 0 {
 				share = e.ds.Used * 100 / c.Used
 			}
-			row = marker + "  " + padR(truncate(name, nameW), nameW) +
-				" " + bar(share, 5) + " " + padL(zfs.NiceBytes(e.ds.Used), 6)
+			left := "    " + padR(truncate(name, nameW), nameW) + " "
+			right := " " + padL(zfs.NiceBytes(e.ds.Used), 6)
+			if onCur {
+				left = styInv.Render("▸   " + padR(truncate(name, nameW), nameW) + " ")
+				row = left + bar(share, 5) + styInv.Render(padR(right, w-nameW-11))
+			} else {
+				row = left + bar(share, 5) + right
+			}
 		case eFam:
-			label := fmt.Sprintf("@%s (%d)", e.fam.Label(), len(e.fam.Snaps))
-			row = marker + padR(truncate(label, nameW+5), nameW+5) +
+			all := len(e.fam.Snaps) > 0
+			for _, s := range e.fam.Snaps {
+				if !m.br.selSnaps[s.Snap] {
+					all = false
+					break
+				}
+			}
+			selMark := " "
+			if all {
+				selMark = "*"
+			}
+			body := selMark + padR(truncate("@"+e.fam.Label()+fmt.Sprintf(" (%d)", len(e.fam.Snaps)), nameW+5), nameW+5) +
 				" " + padL(zfs.NiceBytes(e.fam.Used()), 6)
+			switch {
+			case onCur:
+				row = styInv.Render(padR("▸"+body, w))
+			case all:
+				row = " " + styWarn.Render(body)
+			default:
+				row = " " + body
+			}
 		case eSnap:
-			row = marker + padR(truncate("@"+e.snap.Snap, nameW+5), nameW+5) +
+			selMark := " "
+			if m.br.selSnaps[e.snap.Snap] {
+				selMark = "*"
+			}
+			indent := ""
+			if e.member {
+				indent = " "
+			}
+			body := selMark + indent + padR(truncate("@"+e.snap.Snap, nameW+5-len(indent)), nameW+5-len(indent)) +
 				" " + padL(zfs.NiceBytes(e.snap.Used), 6)
-			row = styDim.Render(row)
-		}
-		if i == cur {
-			row = styBold.Render(row)
+			switch {
+			case onCur:
+				row = styInv.Render(padR("▸"+body, w))
+			case selMark == "*":
+				row = " " + styWarn.Render(body)
+			default:
+				row = " " + styDim.Render(body)
+			}
 		}
 		lines = append(lines, row)
 	}
@@ -100,15 +146,76 @@ func brRightTitle(sel brEntry) string {
 }
 
 func brInspector(m *Model, sel brEntry, w, h int) []string {
+	if len(m.br.selSnaps) > 0 {
+		return clampLines(selInspector(m, w), h)
+	}
 	switch sel.kind {
 	case eSelf, eChild:
 		return clampLines(dsInspector(m, sel.ds, w), h)
 	case eFam:
-		return clampLines(famInspector(sel.fam), h)
+		return clampLines(famInspector(m, sel.fam, w), h)
 	case eSnap:
 		return clampLines(snapInspector(m, sel.snap), h)
 	}
 	return nil
+}
+
+// reclaimLines renders the dry-run verdict for a target: the verbatim
+// "would reclaim" line once known, the Σ lower bound only until then.
+func (m *Model) reclaimLines(target string, snaps []*zfs.Snapshot, w int) []string {
+	var sum int64
+	for _, s := range snaps {
+		sum += s.Used
+	}
+	r := m.dryCache[target]
+	switch {
+	case r != nil && r.errText != "":
+		return []string{
+			" Σ used " + zfs.NiceBytes(sum) + styDim.Render(" — lower bound"),
+			" " + styDim.Render("dry-run: "+truncate(r.errText, w-12)),
+		}
+	case r != nil && !r.pending && r.text != "":
+		reclaim := ""
+		for _, l := range strings.Split(r.text, "\n") {
+			if strings.Contains(l, "would reclaim") {
+				reclaim = strings.TrimSpace(l)
+			}
+		}
+		if reclaim == "" {
+			reclaim = "would reclaim: (no output)"
+		}
+		return []string{" " + styGood.Render(reclaim)}
+	default:
+		return []string{
+			" Σ used " + zfs.NiceBytes(sum) + styDim.Render(" — lower bound"),
+			" " + styDim.Render("computing true reclaim…"),
+		}
+	}
+}
+
+// selInspector shows the marked snapshots and the authoritative reclaim
+// figure — per-snapshot sums lie (shared blocks), the dry-run doesn't.
+func selInspector(m *Model, w int) []string {
+	sel := m.brSelection()
+	c := m.brContainer()
+	lines := []string{
+		fmt.Sprintf(" %d snapshots selected", len(sel)),
+		" " + styDim.Render("of "+truncate(c.Name, w-6)),
+		"",
+	}
+	lines = append(lines, m.reclaimLines(m.SelectionTarget(), sel, w)...)
+	lines = append(lines, "")
+	show := sel
+	if len(show) > 12 {
+		lines = append(lines, " "+styDim.Render(fmt.Sprintf("… %d more", len(show)-12)))
+		show = show[len(show)-12:]
+	}
+	for _, s := range show {
+		lines = append(lines, " "+styWarn.Render("*@"+truncate(s.Snap, w-16))+"  "+
+			styDim.Render(zfs.NiceBytes(s.Used)))
+	}
+	lines = append(lines, "", " "+styDim.Render("space: toggle · esc: clear"))
+	return lines
 }
 
 func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
@@ -379,15 +486,14 @@ func snapInspector(m *Model, s *zfs.Snapshot) []string {
 	}
 }
 
-func famInspector(f *zfs.SnapFamily) []string {
+func famInspector(m *Model, f *zfs.SnapFamily, w int) []string {
 	lines := []string{
 		fmt.Sprintf(" @%s · %d snapshots", f.Label(), len(f.Snaps)),
 		" " + styDim.Render(absDate(f.Oldest().Creation)+" → "+absDate(f.Newest().Creation)),
 		"",
-		" Σ used " + zfs.NiceBytes(f.Used()) +
-			styDim.Render(" — sum of unique sizes; true reclaim needs a dry-run destroy"),
-		"",
 	}
+	lines = append(lines, m.reclaimLines(m.famTarget(f), f.Snaps, w)...)
+	lines = append(lines, "")
 	show := f.Snaps
 	if len(show) > 8 {
 		show = show[len(show)-8:]

@@ -25,23 +25,33 @@ func treeNarrowPane(m *Model, w, h int) []string {
 	cur := m.treeIdx(rows)
 	var lines []string
 	for i, r := range rows {
+		onCur := i == cur
 		marker := "  "
-		if i == cur {
+		if onCur {
 			marker = "▸ "
 		}
 		var row string
 		switch r.kind {
 		case rOverview:
 			row = marker + "≡ overview"
+			if onCur {
+				row = styInv.Render(padR(row, w))
+			}
 		case rPool:
 			nameW := w - 27
 			if nameW < 6 {
 				nameW = 6
 			}
-			row = marker + expandMark(r) + " " +
-				healthStyle(r.pool.State).Render(padR(truncate(r.pool.Name, nameW), nameW)) +
-				" " + bar(r.pool.CapPct, 8) + " " + padL(pctStr(r.pool.CapPct), 4) +
-				" " + padL(zfs.NiceBytes(r.pool.Size), 6)
+			left := marker + expandMark(r) + " " + padR(truncate(r.pool.Name, nameW), nameW) + " "
+			right := " " + padL(pctStr(r.pool.CapPct), 4) + " " + padL(zfs.NiceBytes(r.pool.Size), 6)
+			if onCur {
+				row = styInv.Render(left) + bar(r.pool.CapPct, 8) +
+					styInv.Render(padR(right, w-lipgloss.Width(left)-8))
+			} else {
+				row = marker + expandMark(r) + " " +
+					healthStyle(r.pool.State).Render(padR(truncate(r.pool.Name, nameW), nameW)) +
+					" " + bar(r.pool.CapPct, 8) + right
+			}
 		case rDataset:
 			indent := rep("  ", r.depth)
 			nameW := w - 13 - len(indent)
@@ -51,9 +61,9 @@ func treeNarrowPane(m *Model, w, h int) []string {
 			row = marker + indent + expandMark(r) + " " +
 				padR(truncate(r.ds.Base(), nameW), nameW) +
 				" " + padL(zfs.NiceBytes(r.ds.Used), 7)
-		}
-		if i == cur {
-			row = styBold.Render(row)
+			if onCur {
+				row = styInv.Render(padR(row, w))
+			}
 		}
 		lines = append(lines, row)
 	}
@@ -143,7 +153,8 @@ func overviewPane(m *Model, w, h int) []string {
 				ioCell(sub.RBw, rh, loaded > 0) + "  " + ioCell(sub.WBw, wh, loaded > 0)
 		}
 		if i == cur {
-			row = styBold.Render(row)
+			// the wide view's cursor only ever rests on the overview row
+			row = styInv.Render(padR(row, w))
 		}
 		lines = append(lines, row)
 	}
