@@ -25,6 +25,7 @@ func main() {
 	sel := flag.String("select", "", "pool to select for --dump")
 	browse := flag.String("browse", "", "dataset whose browser level to render for --dump")
 	cursor := flag.String("cursor", "", "row to select within --browse (child base name or @snap)")
+	expand := flag.String("expand", "", "comma-separated pools/datasets to unfold for --dump tree views")
 	flag.Parse()
 
 	var src collect.Source
@@ -66,8 +67,33 @@ func main() {
 				m.ApplyStatData(arc, iostat, objsets)
 			}
 		}
+		if *expand != "" {
+			fetched := map[string]bool{}
+			for _, item := range strings.Split(*expand, ",") {
+				item = strings.TrimSpace(item)
+				if item == "" {
+					continue
+				}
+				pool := strings.SplitN(item, "/", 2)[0]
+				if !fetched[pool] {
+					if dsText, err := src.DatasetTexts(ctx, pool); err == nil {
+						m.ApplyDatasets(pool, dsText)
+					}
+					fetched[pool] = true
+				}
+				m.ExpandFor(item)
+			}
+		}
 		if *sel != "" {
 			m.SetSelected(*sel)
+			if strings.Contains(*sel, "/") {
+				if snapText, err := src.SnapshotTexts(ctx, *sel); err == nil {
+					m.ApplySnaps(*sel, snapText)
+				}
+				if propText, err := src.PropTexts(ctx, *sel); err == nil {
+					m.ApplyProps(*sel, propText)
+				}
+			}
 		}
 		if *browse != "" {
 			pool := strings.SplitN(*browse, "/", 2)[0]

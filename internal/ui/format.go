@@ -64,8 +64,10 @@ func elastic(widths map[string]int, key, s string) string {
 
 var sparkRunes = []rune("▁▂▃▄▅▆▇█")
 
-// sparkline renders values as a mini bar chart scaled to the window's max;
-// an all-zero window is a flat dim line, honest about idleness.
+// sparkline renders values as a mini bar chart scaled to the window's max,
+// always exactly width cells: history shorter than the window left-pads
+// with blanks so the newest sample stays pinned at the right edge and
+// columns never creep as samples accumulate.
 func sparkline(vals []int64, width int) string {
 	if len(vals) > width {
 		vals = vals[len(vals)-width:]
@@ -84,7 +86,7 @@ func sparkline(vals []int64, width int) string {
 		}
 		b.WriteRune(sparkRunes[i])
 	}
-	return styDim.Render(b.String())
+	return rep(" ", width-len(vals)) + styDim.Render(b.String())
 }
 
 // padR pads or truncates a *plain* (unstyled) string to exactly w cells.

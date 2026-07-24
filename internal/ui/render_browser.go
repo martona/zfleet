@@ -154,7 +154,7 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 		default:
 			mp = " " + styDim.Render("not mounted "+truncate(d.Mountpoint, w-22))
 		}
-		if p, ok := m.br.props[d.Name]; ok {
+		if p, ok := m.dsProps[d.Name]; ok {
 			switch src := p["mountpoint"].Source; {
 			case src == "received":
 				mp += styWarn.Render(" ·recv")
@@ -177,7 +177,7 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 	// blocks pad to (parity+1)-sector multiples, so compressing a 16K block
 	// to 10K often allocates exactly the same 8 sectors.
 	if d.LogicalUsed > 0 && d.Used > 0 {
-		vw, par, ash, geo := m.poolGeometry(m.br.pool)
+		vw, par, ash, geo := m.poolGeometry(poolOf(d.Name))
 		volGeo := geo && d.IsVolume() && d.Volblocksize > 0
 
 		vsLogical := (float64(d.Used)/float64(d.LogicalUsed) - 1) * 100
@@ -246,7 +246,7 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 	// snapshots summary from lazy fetch. "pinning" splits usedbysnapshots
 	// into per-snapshot-unique vs collectively-held space — when shared
 	// dwarfs unique, only a range destroy gets the space back.
-	if snaps, ok := m.br.snaps[d.Name]; ok {
+	if snaps, ok := m.dsSnaps[d.Name]; ok {
 		if len(snaps) == 0 {
 			lines = append(lines, " "+styDim.Render("no snapshots"))
 		} else {
@@ -271,7 +271,7 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 	lines = append(lines, "")
 
 	// key properties, with source tags once `zfs get` lands
-	props := m.br.props[d.Name]
+	props := m.dsProps[d.Name]
 	tag := func(name string) string {
 		p, ok := props[name]
 		if !ok {
@@ -312,32 +312,15 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 	}
 	lines = append(lines, " "+styDim.Render("created "+absDate(d.Creation)))
 
-	// live io from objset kstat deltas. Entries exist only for loaded
-	// datasets (mounted fs, active zvols) — when the container itself has
-	// no objset, the subtree sum IS the answer and takes the main line.
+	// live io from objset kstat deltas, nesting like `used`: one reading
+	// covering this dataset and everything beneath it. Entries exist only
+	// for loaded datasets (mounted fs, active zvols).
 	lines = append(lines, "")
-	own, ownOK := m.dsIO[d.Name]
-	sub, subRH, subWH, loaded := m.subtreeIO(d)
-	ioLine := func(r zfs.IORates, rh, wh []int64, tag string) string {
-		return " io   r " + padL(zfs.NiceBytes(r.RBw)+"/s", 8) + " " + sparkline(rh, 10) +
-			"   w " + padL(zfs.NiceBytes(r.WBw)+"/s", 8) + " " + sparkline(wh, 10) + tag
-	}
+	sub, rh, wh, loaded := m.subtreeIO(d)
 	switch {
-	case ownOK:
-		hist := m.dsIOHist[d.Name]
-		rh := make([]int64, len(hist))
-		wh := make([]int64, len(hist))
-		for i, s := range hist {
-			rh[i] = s.RBw
-			wh[i] = s.WBw
-		}
-		lines = append(lines, ioLine(own, rh, wh, ""))
-		if loaded > 1 { // other loaded datasets beneath this one
-			lines = append(lines, " tree "+styDim.Render("r ")+padL(zfs.NiceBytes(sub.RBw)+"/s", 8)+
-				strings.Repeat(" ", 12)+styDim.Render("w ")+padL(zfs.NiceBytes(sub.WBw)+"/s", 8))
-		}
 	case loaded > 0:
-		lines = append(lines, ioLine(sub, subRH, subWH, styDim.Render(" ·tree")))
+		lines = append(lines, " io   r "+padL(zfs.NiceBytes(sub.RBw)+"/s", 8)+" "+sparkline(rh, 10)+
+			"   w "+padL(zfs.NiceBytes(sub.WBw)+"/s", 8)+" "+sparkline(wh, 10))
 	case m.objsetPrev != nil:
 		reason := "dataset not loaded"
 		if len(d.Children) > 0 {

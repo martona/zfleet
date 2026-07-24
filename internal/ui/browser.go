@@ -12,18 +12,19 @@ import (
 	"github.com/martona/zfs-explorer/internal/zfs"
 )
 
-// The dataset browser: one level per view, mc-style. Row zero is the
+// The drill browser: one level per view, mc-style. Row zero is the
 // container itself — the named, inspectable ".." (Enter on it goes up).
 // Child datasets indent beneath it; the container's own snapshots close the
 // list back at container indent, because they belong to it, not to the
-// children.
+// children. Dataset trees, snapshots, and properties live in shared Model
+// caches, used by the tree screen too.
 
 const (
-	modePools = iota
+	modePools = iota // the tree/overview screen
 	modeBrowser
 )
 
-const browserInterval = 10 * time.Second
+const datasetsInterval = 10 * time.Second
 
 const familyMinSize = 3
 
@@ -33,30 +34,28 @@ type brLevel struct {
 }
 
 type browserState struct {
-	pool      string
-	tree      *zfs.DatasetTree
-	stack     []brLevel
-	snaps     map[string][]*zfs.Snapshot // fetched; empty non-nil = "none"
-	snapsPend map[string]bool
-	props     map[string]map[string]zfs.Prop
-	propsPend map[string]bool
-	expanded  map[string]bool // container + "\x00" + family label
-	sortUsed  bool
-	filter    string
-	filterIn  bool
-	tickArmed bool
+	pool     string
+	stack    []brLevel
+	expFams  map[string]bool // container + "\x00" + family label
+	sortUsed bool
+	filter   string
+	filterIn bool
 }
 
 func newBrowserState(pool string) browserState {
 	return browserState{
-		pool:      pool,
-		snaps:     map[string][]*zfs.Snapshot{},
-		snapsPend: map[string]bool{},
-		props:     map[string]map[string]zfs.Prop{},
-		propsPend: map[string]bool{},
-		expanded:  map[string]bool{},
-		sortUsed:  true,
+		pool:     pool,
+		expFams:  map[string]bool{},
+		sortUsed: true,
 	}
+}
+
+// poolOf returns the pool component of a dataset path.
+func poolOf(name string) string {
+	if i := strings.IndexByte(name, '/'); i >= 0 {
+		return name[:i]
+	}
+	return name
 }
 
 // row kinds
@@ -76,10 +75,11 @@ type brEntry struct {
 }
 
 func (m *Model) brContainer() *zfs.Dataset {
-	if m.br.tree == nil || len(m.br.stack) == 0 {
+	tree := m.dsTrees[m.br.pool]
+	if tree == nil || len(m.br.stack) == 0 {
 		return nil
 	}
-	return m.br.tree.ByName[m.br.stack[len(m.br.stack)-1].name]
+	return tree.ByName[m.br.stack[len(m.br.stack)-1].name]
 }
 
 func (m *Model) brEntries() []brEntry {
@@ -105,7 +105,7 @@ func (m *Model) brEntries() []brEntry {
 		}
 	}
 
-	snapEntries := zfs.GroupSnapshots(m.br.snaps[c.Name], familyMinSize)
+	snapEntries := zfs.GroupSnapshots(m.dsSnaps[c.Name], familyMinSize)
 	if m.br.sortUsed {
 		sort.SliceStable(snapEntries, func(i, j int) bool { return snapEntries[i].Used() > snapEntries[j].Used() })
 	}
@@ -115,7 +115,7 @@ func (m *Model) brEntries() []brEntry {
 				continue
 			}
 			out = append(out, brEntry{kind: eFam, fam: e.Fam, id: "@" + e.Fam.Label()})
-			if m.br.expanded[c.Name+"\x00"+e.Fam.Label()] {
+			if m.br.expFams[c.Name+"\x00"+e.Fam.Label()] {
 				for _, s := range e.Fam.Snaps {
 					out = append(out, brEntry{kind: eSnap, snap: s, id: "@" + s.Snap})
 				}
@@ -178,52 +178,61 @@ func (m *Model) brDescend(ds *zfs.Dataset) {
 	m.br.filter, m.br.filterIn = "", false
 }
 
-// enterBrowser switches to the dataset browser for a pool, reusing cached
-// state when returning to the same pool.
-func (m *Model) enterBrowser(pool string) tea.Cmd {
-	if m.br.pool != pool {
+// enterBrowserAt opens the drill browser at a dataset path (a bare pool
+// name opens the root level). Returning to the same pool's root restores
+// the previous position.
+func (m *Model) enterBrowserAt(path string) tea.Cmd {
+	pool := poolOf(path)
+	samePool := m.br.pool == pool
+	if !samePool {
 		m.br = newBrowserState(pool)
 	}
-	if len(m.br.stack) == 0 {
-		m.br.stack = []brLevel{{name: pool, cursor: "·"}}
+	if !(samePool && path == pool && len(m.br.stack) > 0) {
+		segs := strings.Split(path, "/")
+		m.br.stack = nil
+		for i := range segs {
+			m.br.stack = append(m.br.stack, brLevel{name: strings.Join(segs[:i+1], "/"), cursor: "·"})
+		}
 	}
 	m.mode = modeBrowser
-	cmds := []tea.Cmd{fetchDatasets(m.src, pool)}
-	if !m.br.tickArmed {
-		m.br.tickArmed = true
-		cmds = append(cmds, tea.Tick(browserInterval, func(time.Time) tea.Msg { return browserTickMsg{} }))
-	}
-	return tea.Batch(cmds...)
+	return tea.Batch(m.ensureTreeCmd(pool), m.brEnsure())
 }
 
-// brEnsure requests any lazy data the current view is missing: the
-// container's snapshots (they are rows) and the selection's snapshots and
-// property sources (they feed the inspector).
+// lazy-fetch helpers shared by the browser and the tree screen
+
+func (m *Model) ensureTreeCmd(pool string) tea.Cmd {
+	if m.dsTrees[pool] != nil || m.dsTreesPend[pool] {
+		return nil
+	}
+	m.dsTreesPend[pool] = true
+	return fetchDatasets(m.src, pool)
+}
+
+func (m *Model) ensureSnapsCmd(name string) tea.Cmd {
+	if _, ok := m.dsSnaps[name]; ok || m.dsSnapsPend[name] {
+		return nil
+	}
+	m.dsSnapsPend[name] = true
+	return fetchSnaps(m.src, name)
+}
+
+func (m *Model) ensurePropsCmd(name string) tea.Cmd {
+	if _, ok := m.dsProps[name]; ok || m.dsPropsPend[name] {
+		return nil
+	}
+	m.dsPropsPend[name] = true
+	return fetchProps(m.src, name)
+}
+
+// brEnsure requests any lazy data the current view is missing.
 func (m *Model) brEnsure() tea.Cmd {
 	c := m.brContainer()
 	if c == nil {
 		return nil
 	}
-	var cmds []tea.Cmd
-	needSnaps := func(name string) {
-		if _, ok := m.br.snaps[name]; !ok && !m.br.snapsPend[name] {
-			m.br.snapsPend[name] = true
-			cmds = append(cmds, fetchSnaps(m.src, name))
-		}
-	}
-	needProps := func(name string) {
-		if _, ok := m.br.props[name]; !ok && !m.br.propsPend[name] {
-			m.br.propsPend[name] = true
-			cmds = append(cmds, fetchProps(m.src, name))
-		}
-	}
-	needSnaps(c.Name)
+	cmds := []tea.Cmd{m.ensureSnapsCmd(c.Name)}
 	if sel := m.brSelected(); sel.ds != nil {
-		needSnaps(sel.ds.Name)
-		needProps(sel.ds.Name)
-	}
-	if len(cmds) == 0 {
-		return nil
+		cmds = append(cmds, m.ensureSnapsCmd(sel.ds.Name), m.ensurePropsCmd(sel.ds.Name))
 	}
 	return tea.Batch(cmds...)
 }
@@ -262,17 +271,15 @@ func (m *Model) browserKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if e := m.brEntries(); len(e) > 0 {
 			m.brSetCursorID(e[len(e)-1].id)
 		}
-	case "enter", "l", "right":
+	case "enter":
 		switch sel := m.brSelected(); sel.kind {
-		case eSelf:
-			if msg.String() == "enter" { // the named ".." — Enter walks up
-				m.brUp()
-			}
+		case eSelf: // the named ".." — Enter walks up
+			m.brUp()
 		case eChild:
 			m.brDescend(sel.ds)
 		case eFam:
 			key := m.brContainer().Name + "\x00" + sel.fam.Label()
-			m.br.expanded[key] = !m.br.expanded[key]
+			m.br.expFams[key] = !m.br.expFams[key]
 		}
 	case "backspace", "left", "h":
 		m.brUp()
@@ -307,7 +314,7 @@ type propsMsg struct {
 	text string
 	err  error
 }
-type browserTickMsg struct{}
+type datasetsTickMsg struct{}
 
 func fetchDatasets(src collect.Source, pool string) tea.Cmd {
 	return func() tea.Msg {
@@ -339,10 +346,8 @@ func fetchProps(src collect.Source, ds string) tea.Cmd {
 // exported helpers for --dump
 
 func (m *Model) ApplyDatasets(pool, text string) {
-	if m.br.pool != pool {
-		m.br = newBrowserState(pool)
-	}
-	m.br.tree = zfs.ParseDatasets(text)
+	m.dsTrees[pool] = zfs.ParseDatasets(text)
+	delete(m.dsTreesPend, pool)
 }
 
 func (m *Model) ApplySnaps(ds, text string) {
@@ -350,19 +355,24 @@ func (m *Model) ApplySnaps(ds, text string) {
 	if snaps == nil {
 		snaps = []*zfs.Snapshot{}
 	}
-	m.br.snaps[ds] = snaps
-	delete(m.br.snapsPend, ds)
+	m.dsSnaps[ds] = snaps
+	delete(m.dsSnapsPend, ds)
 }
 
 func (m *Model) ApplyProps(ds, text string) {
-	m.br.props[ds] = zfs.ParseProps(text, ds)
-	delete(m.br.propsPend, ds)
+	m.dsProps[ds] = zfs.ParseProps(text, ds)
+	delete(m.dsPropsPend, ds)
 }
 
-// BrowseTo opens the browser at the given dataset's level.
+// BrowseTo opens the browser at the given dataset's level (dump helper).
 func (m *Model) BrowseTo(path string) bool {
-	if m.br.tree == nil || m.br.tree.ByName[path] == nil {
+	pool := poolOf(path)
+	tree := m.dsTrees[pool]
+	if tree == nil || tree.ByName[path] == nil {
 		return false
+	}
+	if m.br.pool != pool {
+		m.br = newBrowserState(pool)
 	}
 	segs := strings.Split(path, "/")
 	m.br.stack = nil

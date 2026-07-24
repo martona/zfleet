@@ -47,6 +47,36 @@ func frame(m *Model) string {
 		return "collecting…"
 	}
 
+	contentH := m.h - 4
+
+	title := func(t string, w int) string {
+		seg := " " + t + " "
+		if lipgloss.Width(seg) > w-2 {
+			seg = " " + truncate(t, w-4) + " "
+		}
+		return "─" + seg + rep("─", w-1-lipgloss.Width(seg))
+	}
+
+	// cursor on the overview row: the inspector dissolves and the tree
+	// renders full-width with io columns
+	if m.mode == modePools && m.treeSelected().kind == rOverview {
+		inner := m.w - 2
+		lines := overviewPane(m, inner, contentH)
+		var b strings.Builder
+		b.WriteString("┌" + title("overview", inner) + "┐\n")
+		for i := 0; i < contentH; i++ {
+			l := ""
+			if i < len(lines) {
+				l = lines[i]
+			}
+			b.WriteString("│" + fit(l, inner) + "│\n")
+		}
+		b.WriteString("├" + rep("─", inner) + "┤\n")
+		b.WriteString("│" + fit(strip(m), inner) + "│\n")
+		b.WriteString("└" + rep("─", inner) + "┘")
+		return b.String()
+	}
+
 	leftW := 36
 	if m.mode == modeBrowser {
 		leftW = 46
@@ -55,7 +85,6 @@ func frame(m *Model) string {
 		leftW = m.w * 45 / 100
 	}
 	rightW := m.w - leftW - 3
-	contentH := m.h - 4
 
 	var leftTitle, rightTitle string
 	var left, right []string
@@ -66,20 +95,20 @@ func frame(m *Model) string {
 		left = brLeftPane(m, leftW, contentH)
 		right = brInspector(m, bsel, rightW, contentH)
 	} else {
-		sel := m.pools[m.selIdx()]
-		leftTitle, rightTitle = "pools", sel.Name
-		left = leftPane(m, leftW, contentH)
-		right = inspector(m, sel, rightW, contentH)
+		row := m.treeSelected()
+		leftTitle = "pools"
+		left = treeNarrowPane(m, leftW, contentH)
+		switch row.kind {
+		case rPool:
+			rightTitle = row.pool.Name
+			right = inspector(m, row.pool, rightW, contentH)
+		case rDataset:
+			rightTitle = row.ds.Base()
+			right = clampLines(dsInspector(m, row.ds, rightW), contentH)
+		}
 	}
 
 	var b strings.Builder
-	title := func(t string, w int) string {
-		seg := " " + t + " "
-		if lipgloss.Width(seg) > w-2 {
-			seg = " " + truncate(t, w-4) + " "
-		}
-		return "─" + seg + rep("─", w-1-lipgloss.Width(seg))
-	}
 	b.WriteString("┌" + title(leftTitle, leftW) + "┬" + title(rightTitle, rightW) + "┐\n")
 	for i := 0; i < contentH; i++ {
 		l, r := "", ""
@@ -95,29 +124,6 @@ func frame(m *Model) string {
 	b.WriteString("│" + fit(strip(m), m.w-2) + "│\n")
 	b.WriteString("└" + rep("─", m.w-2) + "┘")
 	return b.String()
-}
-
-func leftPane(m *Model, w, h int) []string {
-	nameW := w - 25
-	if nameW < 6 {
-		nameW = 6
-	}
-	var lines []string
-	for _, p := range m.pools {
-		selected := p.Name == m.selName
-		prefix := "  "
-		if selected {
-			prefix = "▸ "
-		}
-		name := healthStyle(p.State).Render(padR(truncate(p.Name, nameW), nameW))
-		row := prefix + name + " " + bar(p.CapPct, 10) + " " +
-			padL(pctStr(p.CapPct), 4) + " " + padL(zfs.NiceBytes(p.Size), 6)
-		if selected {
-			row = styBold.Render(row)
-		}
-		lines = append(lines, row)
-	}
-	return clampLines(lines, h)
 }
 
 func inspector(m *Model, p *zfs.Pool, w, h int) []string {

@@ -23,6 +23,20 @@ type Model struct {
 	mode int
 	br   browserState
 
+	// tree screen state
+	treeSel      string          // row id: "≡", "p:<pool>", or dataset name
+	expanded     map[string]bool // same id scheme
+	treeSortUsed bool
+
+	// shared per-dataset caches, used by both the tree screen and the
+	// drill browser
+	dsTrees     map[string]*zfs.DatasetTree
+	dsTreesPend map[string]bool
+	dsSnaps     map[string][]*zfs.Snapshot // empty non-nil = "none"
+	dsSnapsPend map[string]bool
+	dsProps     map[string]map[string]zfs.Prop
+	dsPropsPend map[string]bool
+
 	pools     []*zfs.Pool
 	rootStats map[string]zfs.RootStat
 	ashift    map[string]int
@@ -30,6 +44,7 @@ type Model struct {
 	arcPrev   zfs.ArcStats
 	haveArc   bool
 	io        map[string]zfs.IORates
+	ioHist    map[string][]zfs.IORates // pool-level ring for sparklines
 	ioText    string
 
 	// per-dataset io from objset kstat deltas
@@ -50,15 +65,24 @@ type Model struct {
 
 func New(src collect.Source) *Model {
 	return &Model{
-		src:       src,
-		br:        newBrowserState(""),
-		rootStats: map[string]zfs.RootStat{},
-		ashift:    map[string]int{},
-		io:        map[string]zfs.IORates{},
-		dsIO:      map[string]zfs.IORates{},
-		dsIOHist:  map[string][]zfs.IORates{},
-		ioW:       map[string]int{},
-		stripW:    map[string]int{},
+		src:          src,
+		br:           newBrowserState(""),
+		treeSortUsed: true,
+		expanded:     map[string]bool{},
+		dsTrees:      map[string]*zfs.DatasetTree{},
+		dsTreesPend:  map[string]bool{},
+		dsSnaps:      map[string][]*zfs.Snapshot{},
+		dsSnapsPend:  map[string]bool{},
+		dsProps:      map[string]map[string]zfs.Prop{},
+		dsPropsPend:  map[string]bool{},
+		rootStats:    map[string]zfs.RootStat{},
+		ashift:       map[string]int{},
+		io:           map[string]zfs.IORates{},
+		ioHist:       map[string][]zfs.IORates{},
+		dsIO:         map[string]zfs.IORates{},
+		dsIOHist:     map[string][]zfs.IORates{},
+		ioW:          map[string]int{},
+		stripW:       map[string]int{},
 	}
 }
 
@@ -112,7 +136,8 @@ func fetchStats(src collect.Source) tea.Cmd {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(fetchPools(m.src), fetchStats(m.src))
+	return tea.Batch(fetchPools(m.src), fetchStats(m.src),
+		tea.Tick(datasetsInterval, func(time.Time) tea.Msg { return datasetsTickMsg{} }))
 }
 
 func (m *Model) poolNames() map[string]bool {
@@ -135,15 +160,10 @@ func (m *Model) selIdx() int {
 // ApplyPoolData ingests parsed pools outside the tea loop (used by --dump).
 func (m *Model) ApplyPoolData(pools []*zfs.Pool) {
 	m.pools = pools
-	if m.selName == "" && len(pools) > 0 {
-		// land on the sickest pool; ties go to the first
-		best := 0
-		for i, p := range pools {
-			if zfs.StateRank(p.State) > zfs.StateRank(pools[best].State) {
-				best = i
-			}
-		}
-		m.selName = pools[best].Name
+	if m.treeSel == "" && len(pools) > 0 {
+		// land on the overview — the fleet answer — as the original
+		// round-1 concept intended
+		m.treeSel = overviewID
 	}
 	if m.ioText != "" {
 		m.io = zfs.ParseIostatPools(m.ioText, m.poolNames())
@@ -195,13 +215,21 @@ func (m *Model) ApplyStatData(arcText, ioText, objsetText string) {
 	m.ioText = ioText
 	if len(m.pools) > 0 {
 		m.io = zfs.ParseIostatPools(ioText, m.poolNames())
+		for name, r := range m.io {
+			hist := append(m.ioHist[name], r)
+			if len(hist) > dsIOHistLen {
+				hist = hist[len(hist)-dsIOHistLen:]
+			}
+			m.ioHist[name] = hist
+		}
 	}
 	if objsetText != "" {
 		m.applyObjsets(zfs.ParseObjsets(objsetText))
 	}
 }
 
-const dsIOHistLen = 12
+// 32 samples at the 2s stat tick ≈ a one-minute sparkline window
+const dsIOHistLen = 32
 
 // applyObjsets turns cumulative objset counters into rates against the
 // previous sample and appends them to each dataset's history ring.
@@ -244,13 +272,22 @@ func (m *Model) applyObjsets(cur map[string]zfs.ObjsetIO) {
 // SetSize sets the frame size directly (used by --dump).
 func (m *Model) SetSize(w, h int) { m.w, m.h = w, h }
 
-// SetSelected moves the cursor to the named pool if it exists (used by
+// SetSelected moves the tree cursor to "overview" or a named pool (used by
 // --dump --select).
 func (m *Model) SetSelected(name string) {
+	if name == "overview" {
+		m.treeSel = overviewID
+		return
+	}
 	for _, p := range m.pools {
 		if p.Name == name {
+			m.treeSel = treePoolID(name)
 			m.setSel(name)
+			return
 		}
+	}
+	if tree := m.dsTrees[poolOf(name)]; tree != nil && tree.ByName[name] != nil {
+		m.treeSel = name
 	}
 }
 
@@ -286,39 +323,53 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, fetchStats(m.src)
 
 	case datasetsMsg:
+		delete(m.dsTreesPend, msg.pool)
 		if msg.err != nil {
 			m.lastErr = msg.err
-		} else if msg.pool == m.br.pool {
-			m.br.tree = zfs.ParseDatasets(msg.text)
+		} else {
+			m.dsTrees[msg.pool] = zfs.ParseDatasets(msg.text)
 		}
-		return m, m.brEnsure()
+		if m.mode == modeBrowser {
+			return m, m.brEnsure()
+		}
+		return m, m.treeEnsure()
 
 	case snapsMsg:
-		delete(m.br.snapsPend, msg.ds)
+		delete(m.dsSnapsPend, msg.ds)
 		if msg.err == nil {
 			m.ApplySnaps(msg.ds, msg.text)
 		}
 		return m, nil
 
 	case propsMsg:
-		delete(m.br.propsPend, msg.ds)
+		delete(m.dsPropsPend, msg.ds)
 		if msg.err == nil {
 			m.ApplyProps(msg.ds, msg.text)
 		}
 		return m, nil
 
-	case browserTickMsg:
-		if m.mode != modeBrowser {
-			m.br.tickArmed = false
-			return m, nil
+	case datasetsTickMsg:
+		cmds := []tea.Cmd{tea.Tick(datasetsInterval, func(time.Time) tea.Msg { return datasetsTickMsg{} })}
+		need := map[string]bool{}
+		if m.mode == modeBrowser && m.br.pool != "" {
+			need[m.br.pool] = true
 		}
-		cmds := []tea.Cmd{
-			fetchDatasets(m.src, m.br.pool),
-			tea.Tick(browserInterval, func(time.Time) tea.Msg { return browserTickMsg{} }),
+		for id := range m.expanded {
+			if strings.HasPrefix(id, "p:") {
+				need[strings.TrimPrefix(id, "p:")] = true
+			}
 		}
-		if c := m.brContainer(); c != nil && !m.br.snapsPend[c.Name] {
-			m.br.snapsPend[c.Name] = true
-			cmds = append(cmds, fetchSnaps(m.src, c.Name))
+		for pool := range need {
+			if !m.dsTreesPend[pool] {
+				m.dsTreesPend[pool] = true
+				cmds = append(cmds, fetchDatasets(m.src, pool))
+			}
+		}
+		if m.mode == modeBrowser {
+			if c := m.brContainer(); c != nil && !m.dsSnapsPend[c.Name] {
+				m.dsSnapsPend[c.Name] = true
+				cmds = append(cmds, fetchSnaps(m.src, c.Name))
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -326,33 +377,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeBrowser {
 			return m.browserKeys(msg)
 		}
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "down", "j":
-			if i := m.selIdx(); i < len(m.pools)-1 {
-				m.setSel(m.pools[i+1].Name)
-			}
-		case "up", "k":
-			if i := m.selIdx(); i > 0 {
-				m.setSel(m.pools[i-1].Name)
-			}
-		case "g":
-			if len(m.pools) > 0 {
-				m.setSel(m.pools[0].Name)
-			}
-		case "G":
-			if len(m.pools) > 0 {
-				m.setSel(m.pools[len(m.pools)-1].Name)
-			}
-		case "t":
-			m.expandAll = !m.expandAll
-		case "enter", "l", "right":
-			if len(m.pools) > 0 {
-				return m, m.enterBrowser(m.selName)
-			}
-		}
-		return m, nil
+		return m.treeKeys(msg)
 	}
 	return m, nil
 }
