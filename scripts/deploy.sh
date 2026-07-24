@@ -6,6 +6,8 @@ cd "$(dirname "$0")/.."
 
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o dist/zfse-linux-amd64 ./cmd/zfse
 ssh -o BatchMode=yes marton@commodoreplus4.lan 'mkdir -p ~/claude/bin'
-scp -q -o BatchMode=yes dist/zfse-linux-amd64 marton@commodoreplus4.lan:claude/bin/zfse
-ssh -o BatchMode=yes marton@commodoreplus4.lan 'chmod +x ~/claude/bin/zfse'
+# upload to a temp name, then rename: replacing a running binary directly
+# fails with "text file busy", but rename swaps it out cleanly
+scp -q -o BatchMode=yes dist/zfse-linux-amd64 marton@commodoreplus4.lan:claude/bin/zfse.new
+ssh -o BatchMode=yes marton@commodoreplus4.lan 'chmod +x ~/claude/bin/zfse.new && mv ~/claude/bin/zfse.new ~/claude/bin/zfse'
 echo "deployed to commodoreplus4:~/claude/bin/zfse"

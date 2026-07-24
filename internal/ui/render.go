@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -47,15 +48,29 @@ func frame(m *Model) string {
 	}
 
 	leftW := 36
-	if m.w < 100 {
-		leftW = m.w * 4 / 10
+	if m.mode == modeBrowser {
+		leftW = 46
+	}
+	if leftW > m.w*45/100 {
+		leftW = m.w * 45 / 100
 	}
 	rightW := m.w - leftW - 3
 	contentH := m.h - 4
 
-	sel := m.pools[m.selIdx()]
-	left := leftPane(m, leftW, contentH)
-	right := inspector(m, sel, rightW, contentH)
+	var leftTitle, rightTitle string
+	var left, right []string
+	if m.mode == modeBrowser {
+		leftTitle = m.breadcrumb()
+		bsel := m.brSelected()
+		rightTitle = brRightTitle(bsel)
+		left = brLeftPane(m, leftW, contentH)
+		right = brInspector(m, bsel, rightW, contentH)
+	} else {
+		sel := m.pools[m.selIdx()]
+		leftTitle, rightTitle = "pools", sel.Name
+		left = leftPane(m, leftW, contentH)
+		right = inspector(m, sel, rightW, contentH)
+	}
 
 	var b strings.Builder
 	title := func(t string, w int) string {
@@ -65,7 +80,7 @@ func frame(m *Model) string {
 		}
 		return "─" + seg + rep("─", w-1-lipgloss.Width(seg))
 	}
-	b.WriteString("┌" + title("pools", leftW) + "┬" + title(sel.Name, rightW) + "┐\n")
+	b.WriteString("┌" + title(leftTitle, leftW) + "┬" + title(rightTitle, rightW) + "┐\n")
 	for i := 0; i < contentH; i++ {
 		l, r := "", ""
 		if i < len(left) {
@@ -154,6 +169,22 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 			"  "+padL(zfs.NiceBytes(c.Alloc), 6)+styDim.Render(" / ")+zfs.NiceBytes(c.Size))
 	}
 
+	// raw-vs-charged allocation overhead against the geometry baseline —
+	// meaningful on raidz, where the pool layer counts parity and padding
+	// but datasets are charged deflated bytes
+	if rs, ok := m.rootStats[p.Name]; ok && rs.Used > 0 && p.Alloc > 0 {
+		if vw, par, ash, geo := m.poolGeometry(p.Name); geo {
+			actual := float64(p.Alloc) / float64(rs.Used)
+			base := zfs.RaidzRawPerCharged(vw, par, ash)
+			actualCell := fmt.Sprintf("×%.2f", actual)
+			if actual > base*1.05 {
+				actualCell = styWarn.Render(actualCell + " (padding excess)")
+			}
+			lines = append(lines, " raw "+actualCell+" per charged byte"+
+				styDim.Render(fmt.Sprintf(" · baseline ×%.2f (raidz%d %dw)", base, par, vw)))
+		}
+	}
+
 	lines = append(lines, "")
 	classLineCount := len(lines) - len(head)
 
@@ -166,7 +197,11 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 		nameW = 12
 	}
 	var topo []string
-	topo = append(topo, " "+padR("", nameW+9)+styDim.Render(padR("STATE", 10)+padL("READ", 5)+padL("WRITE", 6)+padL("CKSUM", 6)))
+	ashiftCell := ""
+	if a, ok := m.ashift[p.Name]; ok {
+		ashiftCell = styDim.Render("ashift " + strconv.Itoa(a))
+	}
+	topo = append(topo, " "+padR(ashiftCell, nameW+9)+styDim.Render(padR("STATE", 10)+padL("READ", 5)+padL("WRITE", 6)+padL("CKSUM", 6)))
 
 	anyCollapsed := false
 	var walk func(v *zfs.Vdev, classPrefix string, depth int)

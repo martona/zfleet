@@ -20,13 +20,17 @@ type Model struct {
 	src collect.Source
 
 	w, h int
+	mode int
+	br   browserState
 
-	pools   []*zfs.Pool
-	arc     zfs.ArcStats
-	arcPrev zfs.ArcStats
-	haveArc bool
-	io      map[string]zfs.IORates
-	ioText  string
+	pools     []*zfs.Pool
+	rootStats map[string]zfs.RootStat
+	ashift    map[string]int
+	arc       zfs.ArcStats
+	arcPrev   zfs.ArcStats
+	haveArc   bool
+	io        map[string]zfs.IORates
+	ioText    string
 
 	selName   string
 	expandAll bool
@@ -40,10 +44,13 @@ type Model struct {
 
 func New(src collect.Source) *Model {
 	return &Model{
-		src:    src,
-		io:     map[string]zfs.IORates{},
-		ioW:    map[string]int{},
-		stripW: map[string]int{},
+		src:       src,
+		br:        newBrowserState(""),
+		rootStats: map[string]zfs.RootStat{},
+		ashift:    map[string]int{},
+		io:        map[string]zfs.IORates{},
+		ioW:       map[string]int{},
+		stripW:    map[string]int{},
 	}
 }
 
@@ -55,8 +62,10 @@ func (m *Model) setSel(name string) {
 }
 
 type poolsDataMsg struct {
-	pools []*zfs.Pool
-	err   error
+	pools     []*zfs.Pool
+	rootsText string
+	propsText string
+	err       error
 }
 type statsDataMsg struct {
 	arcText string
@@ -76,7 +85,11 @@ func fetchPools(src collect.Source) tea.Cmd {
 		}
 		pools := zfs.ParseZpoolStatus(status)
 		zfs.AttachListNumbers(pools, list)
-		return poolsDataMsg{pools: pools}
+		// best-effort extras; the overhead line simply doesn't render
+		// when either is unavailable
+		roots, _ := src.RootTexts(ctx)
+		props, _ := src.PoolProps(ctx)
+		return poolsDataMsg{pools: pools, rootsText: roots, propsText: props}
 	}
 }
 
@@ -128,6 +141,41 @@ func (m *Model) ApplyPoolData(pools []*zfs.Pool) {
 	}
 }
 
+// ApplyAuxPools ingests the per-pool root totals and ashift values that
+// feed the allocation-overhead line.
+func (m *Model) ApplyAuxPools(rootsText, propsText string) {
+	if rootsText != "" {
+		m.rootStats = zfs.ParseRootStats(rootsText)
+	}
+	if propsText != "" {
+		m.ashift = zfs.ParsePoolAshift(propsText)
+	}
+}
+
+// poolGeometry returns the data-vdev raidz shape of a pool, when it has one.
+func (m *Model) poolGeometry(pool string) (width, parity, ashift int, ok bool) {
+	ashift, haveShift := m.ashift[pool]
+	if !haveShift {
+		return 0, 0, 0, false
+	}
+	for _, p := range m.pools {
+		if p.Name != pool {
+			continue
+		}
+		data := p.Class("data")
+		if data == nil || len(data.Vdevs) == 0 {
+			return 0, 0, 0, false
+		}
+		v := data.Vdevs[0]
+		par, isRaidz := zfs.RaidzShape(v.Name)
+		if !isRaidz || len(v.Children) <= par {
+			return 0, 0, 0, false
+		}
+		return len(v.Children), par, ashift, true
+	}
+	return 0, 0, 0, false
+}
+
 // ApplyStatData ingests raw stat text outside the tea loop (used by --dump).
 func (m *Model) ApplyStatData(arcText, ioText string) {
 	if strings.TrimSpace(arcText) != "" {
@@ -167,6 +215,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.lastErr = nil
 			m.ApplyPoolData(msg.pools)
+			m.ApplyAuxPools(msg.rootsText, msg.propsText)
 		}
 		return m, tea.Tick(poolsInterval, func(time.Time) tea.Msg { return poolsTickMsg{} })
 
@@ -184,7 +233,47 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statsTickMsg:
 		return m, fetchStats(m.src)
 
+	case datasetsMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err
+		} else if msg.pool == m.br.pool {
+			m.br.tree = zfs.ParseDatasets(msg.text)
+		}
+		return m, m.brEnsure()
+
+	case snapsMsg:
+		delete(m.br.snapsPend, msg.ds)
+		if msg.err == nil {
+			m.ApplySnaps(msg.ds, msg.text)
+		}
+		return m, nil
+
+	case propsMsg:
+		delete(m.br.propsPend, msg.ds)
+		if msg.err == nil {
+			m.ApplyProps(msg.ds, msg.text)
+		}
+		return m, nil
+
+	case browserTickMsg:
+		if m.mode != modeBrowser {
+			m.br.tickArmed = false
+			return m, nil
+		}
+		cmds := []tea.Cmd{
+			fetchDatasets(m.src, m.br.pool),
+			tea.Tick(browserInterval, func(time.Time) tea.Msg { return browserTickMsg{} }),
+		}
+		if c := m.brContainer(); c != nil && !m.br.snapsPend[c.Name] {
+			m.br.snapsPend[c.Name] = true
+			cmds = append(cmds, fetchSnaps(m.src, c.Name))
+		}
+		return m, tea.Batch(cmds...)
+
 	case tea.KeyMsg:
+		if m.mode == modeBrowser {
+			return m.browserKeys(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -206,6 +295,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "t":
 			m.expandAll = !m.expandAll
+		case "enter", "l", "right":
+			if len(m.pools) > 0 {
+				return m, m.enterBrowser(m.selName)
+			}
 		}
 		return m, nil
 	}
