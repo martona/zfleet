@@ -1,3 +1,4 @@
 dist/
 *.exe
 /testdata/
+/.claude/
