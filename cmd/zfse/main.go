@@ -55,9 +55,16 @@ func main() {
 		roots, _ := src.RootTexts(ctx)
 		poolProps, _ := src.PoolProps(ctx)
 		m.ApplyAuxPools(roots, poolProps)
-		arc, iostat, err := src.StatTexts(ctx)
+		arc, iostat, objsets, err := src.StatTexts(ctx)
 		if err == nil {
-			m.ApplyStatData(arc, iostat)
+			m.ApplyStatData(arc, iostat, objsets)
+		}
+		if !strings.HasPrefix(src.Name(), "replay") {
+			// second sample so rate-based readouts are real, not blank
+			time.Sleep(1200 * time.Millisecond)
+			if arc, iostat, objsets, err = src.StatTexts(ctx); err == nil {
+				m.ApplyStatData(arc, iostat, objsets)
+			}
 		}
 		if *sel != "" {
 			m.SetSelected(*sel)

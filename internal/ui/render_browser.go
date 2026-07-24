@@ -311,7 +311,77 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 		lines = append(lines, " "+strings.Join(lims, " · "))
 	}
 	lines = append(lines, " "+styDim.Render("created "+absDate(d.Creation)))
+
+	// live io from objset kstat deltas. Entries exist only for loaded
+	// datasets (mounted fs, active zvols) — when the container itself has
+	// no objset, the subtree sum IS the answer and takes the main line.
+	lines = append(lines, "")
+	own, ownOK := m.dsIO[d.Name]
+	sub, subRH, subWH, loaded := m.subtreeIO(d)
+	ioLine := func(r zfs.IORates, rh, wh []int64, tag string) string {
+		return " io   r " + padL(zfs.NiceBytes(r.RBw)+"/s", 8) + " " + sparkline(rh, 10) +
+			"   w " + padL(zfs.NiceBytes(r.WBw)+"/s", 8) + " " + sparkline(wh, 10) + tag
+	}
+	switch {
+	case ownOK:
+		hist := m.dsIOHist[d.Name]
+		rh := make([]int64, len(hist))
+		wh := make([]int64, len(hist))
+		for i, s := range hist {
+			rh[i] = s.RBw
+			wh[i] = s.WBw
+		}
+		lines = append(lines, ioLine(own, rh, wh, ""))
+		if loaded > 1 { // other loaded datasets beneath this one
+			lines = append(lines, " tree "+styDim.Render("r ")+padL(zfs.NiceBytes(sub.RBw)+"/s", 8)+
+				strings.Repeat(" ", 12)+styDim.Render("w ")+padL(zfs.NiceBytes(sub.WBw)+"/s", 8))
+		}
+	case loaded > 0:
+		lines = append(lines, ioLine(sub, subRH, subWH, styDim.Render(" ·tree")))
+	case m.objsetPrev != nil:
+		reason := "dataset not loaded"
+		if len(d.Children) > 0 {
+			reason = "nothing loaded in subtree"
+		}
+		lines = append(lines, " io   "+styDim.Render("no stats ("+reason+")"))
+	}
 	return lines
+}
+
+// subtreeIO sums current rates and tail-aligned history over d and all its
+// descendants that have loaded objsets.
+func (m *Model) subtreeIO(d *zfs.Dataset) (cur zfs.IORates, rh, wh []int64, loaded int) {
+	var rings [][]zfs.IORates
+	maxLen := 0
+	var walk func(x *zfs.Dataset)
+	walk = func(x *zfs.Dataset) {
+		if r, ok := m.dsIO[x.Name]; ok {
+			cur.RBw += r.RBw
+			cur.WBw += r.WBw
+			cur.ROps += r.ROps
+			cur.WOps += r.WOps
+			loaded++
+			ring := m.dsIOHist[x.Name]
+			rings = append(rings, ring)
+			if len(ring) > maxLen {
+				maxLen = len(ring)
+			}
+		}
+		for _, c := range x.Children {
+			walk(c)
+		}
+	}
+	walk(d)
+	rh = make([]int64, maxLen)
+	wh = make([]int64, maxLen)
+	for _, ring := range rings {
+		off := maxLen - len(ring)
+		for i, s := range ring {
+			rh[off+i] += s.RBw
+			wh[off+i] += s.WBw
+		}
+	}
+	return cur, rh, wh, loaded
 }
 
 func snapInspector(m *Model, s *zfs.Snapshot) []string {

@@ -32,6 +32,12 @@ type Model struct {
 	io        map[string]zfs.IORates
 	ioText    string
 
+	// per-dataset io from objset kstat deltas
+	dsIO       map[string]zfs.IORates
+	dsIOHist   map[string][]zfs.IORates // ring of recent samples, newest last
+	objsetPrev map[string]zfs.ObjsetIO
+	objsetAt   time.Time
+
 	selName   string
 	expandAll bool
 	lastErr   error
@@ -49,6 +55,8 @@ func New(src collect.Source) *Model {
 		rootStats: map[string]zfs.RootStat{},
 		ashift:    map[string]int{},
 		io:        map[string]zfs.IORates{},
+		dsIO:      map[string]zfs.IORates{},
+		dsIOHist:  map[string][]zfs.IORates{},
 		ioW:       map[string]int{},
 		stripW:    map[string]int{},
 	}
@@ -68,9 +76,10 @@ type poolsDataMsg struct {
 	err       error
 }
 type statsDataMsg struct {
-	arcText string
-	ioText  string
-	err     error
+	arcText    string
+	ioText     string
+	objsetText string
+	err        error
 }
 type poolsTickMsg struct{}
 type statsTickMsg struct{}
@@ -97,8 +106,8 @@ func fetchStats(src collect.Source) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		arc, iostat, err := src.StatTexts(ctx)
-		return statsDataMsg{arcText: arc, ioText: iostat, err: err}
+		arc, iostat, objsets, err := src.StatTexts(ctx)
+		return statsDataMsg{arcText: arc, ioText: iostat, objsetText: objsets, err: err}
 	}
 }
 
@@ -177,7 +186,7 @@ func (m *Model) poolGeometry(pool string) (width, parity, ashift int, ok bool) {
 }
 
 // ApplyStatData ingests raw stat text outside the tea loop (used by --dump).
-func (m *Model) ApplyStatData(arcText, ioText string) {
+func (m *Model) ApplyStatData(arcText, ioText, objsetText string) {
 	if strings.TrimSpace(arcText) != "" {
 		m.arcPrev = m.arc
 		m.arc = zfs.ParseArcstats(arcText)
@@ -187,6 +196,49 @@ func (m *Model) ApplyStatData(arcText, ioText string) {
 	if len(m.pools) > 0 {
 		m.io = zfs.ParseIostatPools(ioText, m.poolNames())
 	}
+	if objsetText != "" {
+		m.applyObjsets(zfs.ParseObjsets(objsetText))
+	}
+}
+
+const dsIOHistLen = 12
+
+// applyObjsets turns cumulative objset counters into rates against the
+// previous sample and appends them to each dataset's history ring.
+// Counters reset when a dataset reloads, so negative deltas clamp to zero.
+func (m *Model) applyObjsets(cur map[string]zfs.ObjsetIO) {
+	now := time.Now()
+	dt := now.Sub(m.objsetAt).Seconds()
+	if m.objsetPrev != nil && dt > 0.2 {
+		rates := map[string]zfs.IORates{}
+		for name, c := range cur {
+			p, ok := m.objsetPrev[name]
+			if !ok {
+				continue
+			}
+			clamp := func(d int64) int64 {
+				if d < 0 {
+					return 0
+				}
+				return int64(float64(d) / dt)
+			}
+			r := zfs.IORates{
+				ROps: clamp(c.Reads - p.Reads),
+				WOps: clamp(c.Writes - p.Writes),
+				RBw:  clamp(c.NRead - p.NRead),
+				WBw:  clamp(c.NWritten - p.NWritten),
+			}
+			rates[name] = r
+			hist := append(m.dsIOHist[name], r)
+			if len(hist) > dsIOHistLen {
+				hist = hist[len(hist)-dsIOHistLen:]
+			}
+			m.dsIOHist[name] = hist
+		}
+		m.dsIO = rates
+	}
+	m.objsetPrev = cur
+	m.objsetAt = now
 }
 
 // SetSize sets the frame size directly (used by --dump).
@@ -223,7 +275,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.lastErr = msg.err
 		} else {
-			m.ApplyStatData(msg.arcText, msg.ioText)
+			m.ApplyStatData(msg.arcText, msg.ioText, msg.objsetText)
 		}
 		return m, tea.Tick(statsInterval, func(time.Time) tea.Msg { return statsTickMsg{} })
 

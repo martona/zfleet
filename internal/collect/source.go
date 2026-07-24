@@ -17,9 +17,10 @@ import (
 type Source interface {
 	// PoolTexts returns `zpool status` and `zpool list -Hpv` output.
 	PoolTexts(ctx context.Context) (status, list string, err error)
-	// StatTexts returns arcstats kstat content and one pool-level
-	// `zpool iostat` sample.
-	StatTexts(ctx context.Context) (arcstats, iostat string, err error)
+	// StatTexts returns arcstats kstat content, one pool-level
+	// `zpool iostat` sample, and the concatenated per-dataset objset
+	// kstats ("" when unavailable).
+	StatTexts(ctx context.Context) (arcstats, iostat, objsets string, err error)
 	// DatasetTexts returns wide `zfs list` output covering at least the
 	// given pool; parsers filter, so a superset is fine.
 	DatasetTexts(ctx context.Context, pool string) (string, error)
@@ -56,16 +57,24 @@ func (Exec) PoolTexts(ctx context.Context) (string, string, error) {
 	return string(status), string(list), nil
 }
 
-func (Exec) StatTexts(ctx context.Context) (string, string, error) {
+func (Exec) StatTexts(ctx context.Context) (string, string, string, error) {
 	arc, err := os.ReadFile("/proc/spl/kstat/zfs/arcstats")
 	if err != nil {
 		arc = nil // non-Linux or odd setup: ARC segment will show as unknown
 	}
+	var objsets strings.Builder
+	if paths, _ := filepath.Glob("/proc/spl/kstat/zfs/*/objset-*"); paths != nil {
+		for _, p := range paths {
+			if b, err := os.ReadFile(p); err == nil { // files vanish on unmount
+				objsets.Write(b)
+			}
+		}
+	}
 	iostat, err := exec.CommandContext(ctx, "zpool", "iostat", "-Hpy", "1", "1").Output()
 	if err != nil {
-		return string(arc), "", err
+		return string(arc), "", objsets.String(), err
 	}
-	return string(arc), string(iostat), nil
+	return string(arc), string(iostat), objsets.String(), nil
 }
 
 func (Exec) DatasetTexts(ctx context.Context, pool string) (string, error) {
@@ -119,13 +128,14 @@ func (r Replay) PoolTexts(context.Context) (string, string, error) {
 	return status, list, nil
 }
 
-func (r Replay) StatTexts(context.Context) (string, string, error) {
+func (r Replay) StatTexts(context.Context) (string, string, string, error) {
 	arc, _ := r.read("arcstats.out")
+	objsets, _ := r.read("objset-all.out") // absent in pre-v2 fixture dirs
 	iostat, err := r.read("zpool-iostat-Hpv.out")
 	if err != nil {
-		return arc, "", err
+		return arc, "", objsets, err
 	}
-	return arc, iostat, nil
+	return arc, iostat, objsets, nil
 }
 
 // Replay fixture files cover all pools/datasets at once; parsers filter.

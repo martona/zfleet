@@ -62,6 +62,31 @@ func elastic(widths map[string]int, key, s string) string {
 	return padL(s, widths[key])
 }
 
+var sparkRunes = []rune("▁▂▃▄▅▆▇█")
+
+// sparkline renders values as a mini bar chart scaled to the window's max;
+// an all-zero window is a flat dim line, honest about idleness.
+func sparkline(vals []int64, width int) string {
+	if len(vals) > width {
+		vals = vals[len(vals)-width:]
+	}
+	var max int64
+	for _, v := range vals {
+		if v > max {
+			max = v
+		}
+	}
+	var b strings.Builder
+	for _, v := range vals {
+		i := 0
+		if max > 0 {
+			i = int(v * int64(len(sparkRunes)-1) / max)
+		}
+		b.WriteRune(sparkRunes[i])
+	}
+	return styDim.Render(b.String())
+}
+
 // padR pads or truncates a *plain* (unstyled) string to exactly w cells.
 func padR(s string, w int) string {
 	d := w - lipgloss.Width(s)
