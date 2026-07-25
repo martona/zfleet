@@ -25,7 +25,7 @@ sh_run() { # sh_run <outfile> <shell-line> — for globs and pipelines
 
 # keep in sync with zfs.DatasetFields / zfs.SnapshotFields
 DSFIELDS="name,type,used,avail,refer,usedbysnapshots,usedbydataset,usedbychildren,usedbyrefreservation,mountpoint,mounted,canmount,quota,refquota,reservation,refreservation,recordsize,volsize,volblocksize,compression,compressratio,origin,creation,atime,sync,encryption,keystatus,logicalused,logicalreferenced"
-SNAPFIELDS="name,used,refer,creation"
+SNAPFIELDS="name,used,refer,creation,written"
 
 run zpool-status.out zpool status
 run zpool-list-Hpv.out zpool list -Hpv

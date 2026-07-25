@@ -16,7 +16,7 @@ const DatasetFields = "name,type,used,avail,refer," +
 	"creation,atime,sync,encryption,keystatus,logicalused,logicalreferenced"
 
 // SnapshotFields is the -o list for `zfs list -Hp -t snapshot`.
-const SnapshotFields = "name,used,refer,creation"
+const SnapshotFields = "name,used,refer,creation,written"
 
 type Dataset struct {
 	Name string // full path: rust/recv/bergamo
@@ -108,6 +108,13 @@ type Snapshot struct {
 	Used     int64
 	Refer    int64
 	Creation int64
+	// Written is the space referenced by this snapshot that its predecessor
+	// does not reference — the data born in the window this snapshot
+	// closed. Where Used (unique-only) answers "what would deleting this
+	// free", Written answers "how much changed during its epoch", and does
+	// not shrink when later snapshots share the blocks. -1 when the capture
+	// predates the column.
+	Written int64
 }
 
 // ParseSnapshots extracts the snapshots belonging directly to ds (not its
@@ -122,10 +129,15 @@ func ParseSnapshots(text, ds string) []*Snapshot {
 		if len(f) < 4 || !strings.HasPrefix(f[0], prefix) {
 			continue
 		}
-		out = append(out, &Snapshot{
+		s := &Snapshot{
 			Name: f[0], Snap: f[0][len(prefix):],
 			Used: parseI64(f[1]), Refer: parseI64(f[2]), Creation: parseI64(f[3]),
-		})
+			Written: -1, // pre-written captures tolerated
+		}
+		if len(f) >= 5 {
+			s.Written = parseI64(f[4])
+		}
+		out = append(out, s)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Creation < out[j].Creation })
 	return out

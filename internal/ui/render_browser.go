@@ -268,6 +268,49 @@ func (m *Model) reclaimLines(target string, snaps []*zfs.Snapshot, w int) []stri
 	}
 }
 
+// snapTable is the shared member ledger — name, used, wrote — one view for
+// collapsed families and hand-picked selections alike. The wrote column
+// only exists when the capture carries it.
+func snapTable(snaps []*zfs.Snapshot, w int) []string {
+	haveW := false
+	// the name column hugs its longest occupant — numbers read next to
+	// names, not across a gulf of pane
+	nameW := 12
+	for _, s := range snaps {
+		if s.Written >= 0 {
+			haveW = true
+		}
+		if n := len("@" + s.Snap); n > nameW {
+			nameW = n
+		}
+	}
+	max := w - 2 - 9
+	if haveW {
+		max -= 10
+	}
+	if nameW > max {
+		nameW = max
+	}
+	head := " " + padR("", nameW) + styDim.Render(padL("USED", 9))
+	if haveW {
+		head += styDim.Render(padL("WROTE", 10))
+	}
+	lines := []string{head}
+	for _, s := range snaps {
+		row := " " + styDim.Render(padR(truncate("@"+s.Snap, nameW), nameW)) +
+			dimUnit(padL(zfs.NiceBytes(s.Used), 9))
+		if haveW {
+			wv := "-"
+			if s.Written >= 0 {
+				wv = zfs.NiceBytes(s.Written)
+			}
+			row += dimUnit(padL(wv, 10))
+		}
+		lines = append(lines, row)
+	}
+	return lines
+}
+
 // selInspector shows the marked snapshots and the authoritative reclaim
 // figure — per-snapshot sums lie (shared blocks), the dry-run doesn't.
 func selInspector(m *Model, w int) []string {
@@ -285,10 +328,7 @@ func selInspector(m *Model, w int) []string {
 		lines = append(lines, " "+styDim.Render(fmt.Sprintf("… %d more", len(show)-12)))
 		show = show[len(show)-12:]
 	}
-	for _, s := range show {
-		lines = append(lines, " "+styWarn.Render("*@"+truncate(s.Snap, w-16))+"  "+
-			styDim.Render(zfs.NiceBytes(s.Used)))
-	}
+	lines = append(lines, snapTable(show, w)...)
 	lines = append(lines, "", " "+styDim.Render("space: toggle · esc: clear"))
 	return lines
 }
@@ -400,6 +440,7 @@ func dsInspector(m *Model, h *hostState, d *zfs.Dataset, w int) []string {
 			}
 		}
 	}
+	lines = append(lines, "")
 	barW := w - 26
 	if barW > 30 {
 		barW = 30
@@ -424,33 +465,6 @@ func dsInspector(m *Model, h *hostState, d *zfs.Dataset, w int) []string {
 		comp("children", d.UsedChild),
 		comp("refreserv", d.UsedRefReserv),
 		"")
-
-	// snapshots summary from lazy fetch. "pinning" splits usedbysnapshots
-	// into per-snapshot-unique vs collectively-held space — when shared
-	// dwarfs unique, only a range destroy gets the space back.
-	if snaps, ok := h.dsSnaps[d.Name]; ok {
-		if len(snaps) == 0 {
-			lines = append(lines, " "+styDim.Render("no snapshots"))
-		} else {
-			var uniq int64
-			for _, s := range snaps {
-				uniq += s.Used
-			}
-			shared := d.UsedSnap - uniq
-			if shared < 0 {
-				shared = 0
-			}
-			lines = append(lines, fmt.Sprintf(" snaps %d · pinning %s · newest %s",
-				len(snaps), zfs.NiceBytes(d.UsedSnap), relAge(snaps[len(snaps)-1].Creation)))
-			if d.UsedSnap > 0 {
-				lines = append(lines, "   "+styDim.Render(zfs.NiceBytes(uniq)+" unique · "+
-					zfs.NiceBytes(shared)+" shared across snapshots"))
-			}
-		}
-	} else {
-		lines = append(lines, " "+styDim.Render("snaps …"))
-	}
-	lines = append(lines, "")
 
 	// key properties, with source tags once `zfs get` lands
 	props := h.dsProps[d.Name]
@@ -495,34 +509,92 @@ func dsInspector(m *Model, h *hostState, d *zfs.Dataset, w int) []string {
 	lines = append(lines, " "+styDim.Render("created "+absDate(d.Creation)))
 
 	// live io from objset kstat deltas, nesting like `used`: one reading
-	// covering this dataset and everything beneath it. Entries exist only
-	// for loaded datasets (mounted fs, active zvols).
+	// covering this dataset and everything beneath it, in the pool block's
+	// grammar — rates, aligned sparklines, ops. Entries exist only for
+	// loaded datasets (mounted fs, active zvols).
 	lines = append(lines, "")
 	sub, rh, wh, loaded := h.subtreeIO(d)
 	switch {
 	case loaded > 0:
-		lines = append(lines, " io   r "+ioRate(sub.RBw, 8)+" "+sparklineFam(sparkSteel, rh, 10)+
-			"   w "+ioRate(sub.WBw, 8)+" "+sparklineFam(sparkGold, wh, 10))
+		sw := w - 33
+		if sw > dsIOHistLen/2 {
+			sw = dsIOHistLen / 2
+		}
+		if sw < 8 {
+			sw = 8
+		}
+		ops := func(bw, n int64) string {
+			cell := elastic(h.ioW, "ops", opsCell(bw, n))
+			if bw == 0 && n == 0 {
+				return styDim.Render(cell)
+			}
+			return dimUnit(cell)
+		}
+		lines = append(lines,
+			" "+styBold.Render("io")+"   r "+ioRate(sub.RBw, 7)+"  "+sparklineFam(sparkSteel, rh, sw)+
+				"  "+ops(sub.RBw, sub.ROps),
+			"      w "+ioRate(sub.WBw, 7)+"  "+sparklineFam(sparkGold, wh, sw)+
+				"  "+ops(sub.WBw, sub.WOps))
 	case h.objsetPrev != nil:
 		reason := "dataset not loaded"
 		if len(d.Children) > 0 {
 			reason = "nothing loaded in subtree"
 		}
-		lines = append(lines, " io   "+styDim.Render("no stats ("+reason+")"))
+		lines = append(lines, " "+styBold.Render("io")+"   "+styDim.Render("no stats ("+reason+")"))
+	}
+	lines = append(lines, "")
+
+	// the snapshot ledger closes the view. "pinning" splits usedbysnapshots
+	// into per-snapshot-unique vs collectively-held space — when shared
+	// dwarfs unique, only a range destroy gets the space back.
+	if snaps, ok := h.dsSnaps[d.Name]; ok {
+		if len(snaps) == 0 {
+			lines = append(lines, " "+styDim.Render("no snapshots"))
+		} else {
+			var uniq int64
+			for _, s := range snaps {
+				uniq += s.Used
+			}
+			shared := d.UsedSnap - uniq
+			if shared < 0 {
+				shared = 0
+			}
+			lines = append(lines, fmt.Sprintf(" snaps %d · pinning %s · newest %s",
+				len(snaps), zfs.NiceBytes(d.UsedSnap), relAge(snaps[len(snaps)-1].Creation)))
+			if d.UsedSnap > 0 {
+				lines = append(lines, "   "+styDim.Render(zfs.NiceBytes(uniq)+" unique · "+
+					zfs.NiceBytes(shared)+" shared across snapshots"))
+			}
+		}
+	} else {
+		lines = append(lines, " "+styDim.Render("snaps …"))
 	}
 	return lines
 }
 
 func snapInspector(m *Model, s *zfs.Snapshot) []string {
 	container := s.Name[:strings.IndexByte(s.Name, '@')]
-	return []string{
+	// one label column, values right-aligned so the units anchor. used is
+	// the accountant (what deleting this frees), written the historian
+	// (what changed in the window this snapshot closed — it doesn't shrink
+	// when later snapshots still share the blocks).
+	val := func(label string, v int64, gloss string) string {
+		return " " + padR(label, 8) + dimUnit(padL(zfs.NiceBytes(v), 8)) +
+			" " + styDim.Render("("+gloss+")")
+	}
+	lines := []string{
 		" @" + s.Snap,
 		" " + styDim.Render("of "+truncate(container, 60)),
 		"",
-		" used " + zfs.NiceBytes(s.Used) + styDim.Render(" (unique to this snapshot)"),
-		" refer " + zfs.NiceBytes(s.Refer),
-		" created " + absDate(s.Creation) + " (" + relAge(s.Creation) + ")",
+		val("used", s.Used, "unique to this snapshot"),
 	}
+	if s.Written >= 0 {
+		lines = append(lines, val("written", s.Written, "new data since the previous snapshot"))
+	}
+	return append(lines,
+		val("refer", s.Refer, "data referenced by this snapshot"),
+		"",
+		" "+padR("created", 8)+absDate(s.Creation)+" "+styDim.Render("("+relAge(s.Creation)+")"))
 }
 
 func famInspector(m *Model, f *zfs.SnapFamily, w int) []string {
@@ -538,9 +610,8 @@ func famInspector(m *Model, f *zfs.SnapFamily, w int) []string {
 		show = show[len(show)-8:]
 		lines = append(lines, " "+styDim.Render(fmt.Sprintf("… %d older", len(f.Snaps)-8)))
 	}
-	for _, s := range show {
-		lines = append(lines, " "+styDim.Render("@"+s.Snap+"  "+zfs.NiceBytes(s.Used)))
-	}
+	// scanning the wrote column is how you find the epoch that ate the pool
+	lines = append(lines, snapTable(show, w)...)
 	return lines
 }
 
