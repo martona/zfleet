@@ -299,6 +299,7 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		sum     string
 		verdict string
 		vsty    lipgloss.Style
+		temp    string
 		note    string
 	}
 	var ents []topoEnt
@@ -317,7 +318,16 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		case badge != "":
 			verdict = v.State + " · " + badge
 		}
-		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, vsty, v.Note})
+		temp := ""
+		if len(v.Children) == 0 {
+			if d := h.diskFor(v.Name); d != nil {
+				temp = "-" // resolved but unsensed: smartctl's turn, phase 2
+				if d.TempC >= 0 {
+					temp = fmt.Sprintf("%d°C", d.TempC)
+				}
+			}
+		}
+		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, vsty, temp, v.Note})
 		for _, c := range v.Children {
 			walk(c, "", depth+1)
 		}
@@ -351,10 +361,16 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	if a, ok := h.ashift[p.Name]; ok {
 		ashiftCell = styDim.Render("ashift " + strconv.Itoa(a))
 	}
-	lines = append(lines, " "+padR(ashiftCell, nameW+9)+" "+styDim.Render(padR("STATE", vw)))
+	lines = append(lines, " "+padR(ashiftCell, nameW+9)+" "+styDim.Render(padR("STATE", vw)+padL("TEMP", 6)))
 	for _, e := range ents {
 		row := " " + rep("  ", e.depth) + padR(truncate(e.display, nameW-e.depth*2), nameW-e.depth*2) +
 			padL(e.sum, 9) + " " + e.vsty.Render(padR(e.verdict, vw))
+		switch {
+		case e.temp == "" || e.temp == "-":
+			row += styDim.Render(padL(e.temp, 6))
+		default:
+			row += dimUnit(padL(e.temp, 6))
+		}
 		if e.note != "" {
 			if room := w - lipgloss.Width(row) - 2; room >= 4 {
 				row += " " + styWarn.Render(truncate(e.note, room))

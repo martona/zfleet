@@ -14,6 +14,8 @@ import (
 const (
 	poolsInterval = 5 * time.Second
 	statsInterval = 2 * time.Second
+	// disk topology and aliases change rarely; temps ride the stat tick
+	diskInterval = 60 * time.Second
 )
 
 // HostSpec names one host for the Model: a display name, the ssh
@@ -108,8 +110,16 @@ type infoMsg struct {
 	kernel string
 	osRel  string
 }
+type disksMsg struct {
+	host     string
+	aliases  string
+	sysBlock string
+	lsblk    string
+	hwmonDev string
+}
 type poolsTickMsg struct{}
 type statsTickMsg struct{}
+type diskTickMsg struct{}
 
 func fetchPools(h *hostState) tea.Cmd {
 	host, src := h.name, h.src
@@ -154,15 +164,27 @@ func fetchInfo(h *hostState) tea.Cmd {
 	}
 }
 
+func fetchDisks(h *hostState) tea.Cmd {
+	host, src := h.name, h.src
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		aliases, sysBlock, lsblk, hwmonDev := src.DiskTexts(ctx)
+		return disksMsg{host: host, aliases: aliases, sysBlock: sysBlock,
+			lsblk: lsblk, hwmonDev: hwmonDev}
+	}
+}
+
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		tea.Tick(poolsInterval, func(time.Time) tea.Msg { return poolsTickMsg{} }),
 		tea.Tick(statsInterval, func(time.Time) tea.Msg { return statsTickMsg{} }),
 		tea.Tick(datasetsInterval, func(time.Time) tea.Msg { return datasetsTickMsg{} }),
+		tea.Tick(diskInterval, func(time.Time) tea.Msg { return diskTickMsg{} }),
 	}
 	for _, h := range m.hosts {
-		h.poolsPend, h.statsPend, h.infoPend = true, true, true
-		cmds = append(cmds, fetchPools(h), fetchStats(h), fetchInfo(h))
+		h.poolsPend, h.statsPend, h.infoPend, h.diskPend = true, true, true, true
+		cmds = append(cmds, fetchPools(h), fetchStats(h), fetchInfo(h), fetchDisks(h))
 	}
 	return tea.Batch(cmds...)
 }
@@ -174,6 +196,7 @@ func (m *Model) ApplyPoolData(host string, pools []*zfs.Pool) {
 		return
 	}
 	h.pools = pools
+	h.resolveVdevs()
 	if m.treeSel == "" && len(pools) > 0 {
 		// land on the overview — the fleet answer — as the original
 		// round-1 concept intended
@@ -252,6 +275,13 @@ func (m *Model) ApplyHostVitals(host, uptime, loadavg, stat, hwmon string) {
 func (m *Model) ApplyHostInfo(host, zfsVer, kernel, osRel string) {
 	if h := m.hostByName(host); h != nil {
 		h.applyInfo(zfsVer, kernel, osRel)
+	}
+}
+
+// ApplyDisks ingests the disk-resolution surfaces (also used by --dump).
+func (m *Model) ApplyDisks(host, aliases, sysBlock, lsblk, hwmonDev string) {
+	if h := m.hostByName(host); h != nil {
+		h.applyDisks(aliases, sysBlock, lsblk, hwmonDev)
 	}
 }
 
@@ -343,6 +373,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.applyInfo(msg.zfsVer, msg.kernel, msg.osRel)
 		return m, nil
 
+	case disksMsg:
+		h := m.hostByName(msg.host)
+		if h == nil {
+			return m, nil
+		}
+		h.diskPend = false
+		h.applyDisks(msg.aliases, msg.sysBlock, msg.lsblk, msg.hwmonDev)
+		return m, nil
+
+	case diskTickMsg:
+		cmds := []tea.Cmd{tea.Tick(diskInterval, func(time.Time) tea.Msg { return diskTickMsg{} })}
+		for _, h := range m.hosts {
+			if h.diskPend || (h.conn == connDown && time.Now().Before(h.nextTry)) {
+				continue
+			}
+			h.diskPend = true
+			cmds = append(cmds, fetchDisks(h))
+		}
+		return m, tea.Batch(cmds...)
+
 	case poolsTickMsg:
 		cmds := []tea.Cmd{tea.Tick(poolsInterval, func(time.Time) tea.Msg { return poolsTickMsg{} })}
 		for _, h := range m.hosts {
@@ -365,6 +415,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if h.conn == connLive && !h.haveInfo && !h.infoPend {
 				h.infoPend = true
 				cmds = append(cmds, fetchInfo(h))
+			}
+			if h.conn == connLive && !h.haveDisks && !h.diskPend {
+				h.diskPend = true
+				cmds = append(cmds, fetchDisks(h))
 			}
 		}
 		return m, tea.Batch(cmds...)

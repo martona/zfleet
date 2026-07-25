@@ -7,6 +7,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,10 @@ type Source interface {
 	// InfoTexts returns once-per-connect host identity: `zfs version`
 	// output, the kernel release, and /etc/os-release. Best-effort.
 	InfoTexts(ctx context.Context) (zfsVer, kernel, osRelease string)
+	// DiskTexts returns the disk-resolution surfaces: the /dev/disk
+	// symlink universe, the /sys/class/block map, the lsblk inventory,
+	// and hwmon chip→device links. Best-effort.
+	DiskTexts(ctx context.Context) (aliases, sysBlock, lsblk, hwmonDev string)
 	Name() string
 }
 
@@ -129,7 +134,8 @@ func (Exec) HostTexts(ctx context.Context) (string, string, string, string) {
 	// hwmon files render as path:value lines — the same shape `grep -H .`
 	// produces over ssh, so one parser serves both collectors
 	var hw strings.Builder
-	for _, pat := range []string{"/sys/class/hwmon/hwmon*/name", "/sys/class/hwmon/hwmon*/temp*_input"} {
+	for _, pat := range []string{"/sys/class/hwmon/hwmon*/name",
+		"/sys/class/hwmon/hwmon*/temp*_input", "/sys/class/hwmon/hwmon*/temp*_label"} {
 		paths, _ := filepath.Glob(pat)
 		for _, p := range paths {
 			if b, err := os.ReadFile(p); err == nil {
@@ -146,6 +152,37 @@ func (Exec) InfoTexts(ctx context.Context) (string, string, string) {
 	kernel, _ := os.ReadFile("/proc/sys/kernel/osrelease")
 	osrel, _ := os.ReadFile("/etc/os-release")
 	return string(ver), strings.TrimSpace(string(kernel)), string(osrel)
+}
+
+func (Exec) DiskTexts(ctx context.Context) (string, string, string, string) {
+	var a strings.Builder
+	filepath.WalkDir("/dev/disk", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if target, err := os.Readlink(path); err == nil {
+			a.WriteString(path + " " + target + "\n")
+		}
+		return nil
+	})
+	var sb strings.Builder
+	if ents, err := os.ReadDir("/sys/class/block"); err == nil {
+		for _, e := range ents {
+			if t, err := os.Readlink("/sys/class/block/" + e.Name()); err == nil {
+				sb.WriteString(e.Name() + " " + t + "\n")
+			}
+		}
+	}
+	lsblk, _ := exec.CommandContext(ctx, "lsblk", "-bdP", "-o", "NAME,SIZE,ROTA,MODEL,SERIAL").Output()
+	var hd strings.Builder
+	if hs, _ := filepath.Glob("/sys/class/hwmon/hwmon*"); hs != nil {
+		for _, h := range hs {
+			if dev, err := filepath.EvalSymlinks(h + "/device"); err == nil {
+				hd.WriteString(h + " " + dev + "\n")
+			}
+		}
+	}
+	return a.String(), sb.String(), string(lsblk), hd.String()
 }
 
 func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {
@@ -272,6 +309,14 @@ func (r Replay) InfoTexts(context.Context) (string, string, string) {
 	kernel, _ := r.read("kernel.out")
 	osrel, _ := r.read("os-release.out")
 	return ver, strings.TrimSpace(kernel), osrel
+}
+
+func (r Replay) DiskTexts(context.Context) (string, string, string, string) {
+	aliases, _ := r.read("disk-aliases.out")
+	sysBlock, _ := r.read("sys-block.out")
+	lsblk, _ := r.read("lsblk-disks.out")
+	hwmonDev, _ := r.read("hwmon-dev.out")
+	return aliases, sysBlock, lsblk, hwmonDev
 }
 
 func (Replay) DestroyDryRun(context.Context, string) (string, error) {

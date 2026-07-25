@@ -228,6 +228,97 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 	}
 	lines = append(lines, "")
 
+	// drives: every disk the machine carries, temps where a sensor claims
+	// them — spinners without the drivetemp module wait for smartctl.
+	// Columns hug their longest occupants; shrinking comes back on the
+	// table when phase 2's extra columns bring right-side pressure.
+	lines = append(lines, " "+styBold.Render("drives"))
+	if len(h.disks) == 0 {
+		lines = append(lines, "  "+styDim.Render("none detected"))
+	}
+	nodeW, modelW := 6, 8
+	for _, d := range h.disks {
+		if n := len(d.Node); n > nodeW {
+			nodeW = n
+		}
+		if n := len(d.Model); n > modelW {
+			modelW = n
+		}
+	}
+	for _, d := range h.disks {
+		temp := styDim.Render(padL("-", 5))
+		if d.TempC >= 0 {
+			temp = dimUnit(padL(fmt.Sprintf("%d°C", d.TempC), 5))
+		}
+		media := "ssd"
+		switch {
+		case d.Rota:
+			media = "hdd"
+		case strings.HasPrefix(d.Node, "nvme"):
+			media = "nvme"
+		}
+		model := d.Model
+		if model == "" {
+			model = "?"
+		}
+		lines = append(lines, "  "+padR(d.Node, nodeW+2)+padR(model, modelW+1)+
+			dimUnit(padL(zfs.NiceBytes(d.Size), 7))+temp+" "+styDim.Render(media))
+	}
+	lines = append(lines, "")
+
+	// sensors: every chip with a temperature — anything eligible for the
+	// host line is a named row here; drive-linked chips live above instead
+	lines = append(lines, " "+styBold.Render("sensors"))
+	type sensorRow struct {
+		name, label string
+		milli       int64
+	}
+	var srows []sensorRow
+	for _, c := range h.chips {
+		if _, isDrive := h.chipDisk[c.Dir]; isDrive {
+			continue
+		}
+		name := c.Name
+		if zfs.IsCPUChip(c.Name) {
+			name = "cpu"
+		}
+		var rows []zfs.HwmonTemp
+		for _, t := range c.Temps {
+			if strings.HasPrefix(t.Label, "Package") {
+				rows = append(rows, t)
+			}
+		}
+		if len(rows) == 0 {
+			best := c.Temps[0]
+			for _, t := range c.Temps {
+				if t.MilliC > best.MilliC {
+					best = t
+				}
+			}
+			rows = []zfs.HwmonTemp{best}
+		}
+		for _, t := range rows {
+			srows = append(srows, sensorRow{name, t.Label, t.MilliC})
+		}
+	}
+	if len(srows) == 0 {
+		lines = append(lines, "  "+styDim.Render("none"))
+	}
+	snameW, slabelW := 6, 0
+	for _, r := range srows {
+		if n := len(r.name); n > snameW {
+			snameW = n
+		}
+		if n := len(r.label); n > slabelW {
+			slabelW = n
+		}
+	}
+	for _, r := range srows {
+		lines = append(lines, "  "+padR(r.name, snameW+2)+styDim.Render(padR(r.label, slabelW+2))+
+			dimUnit(padL(fmt.Sprintf("%d°C", int((r.milli+500)/1000)), 5)))
+	}
+	lines = append(lines, "")
+
 	// pools mini-list: the tree below has the detail; this is the roster
 	lines = append(lines, " "+styBold.Render("pools"))
 	if len(h.pools) == 0 {

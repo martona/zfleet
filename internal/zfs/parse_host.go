@@ -1,6 +1,7 @@
 package zfs
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -60,29 +61,63 @@ func ParseCPUStat(s string) (busy, total int64) {
 	return 0, 0
 }
 
-// hwmon chips whose temperature is worth calling the host's: CPU packages
-// and storage. Anything else (NIC PHYs, ambient, chipset) may well be the
-// hottest sensor in the box — commodoreplus4's 10GbE runs 20°C above both
-// Xeon packages — but it is not the reading anyone asks a storage host for.
-var hwmonPreferred = map[string]string{
-	"coretemp":    "cpu",
-	"k10temp":     "cpu",
-	"zenpower":    "cpu",
-	"cpu_thermal": "cpu",
-	"nvme":        "nvme",
-	"drivetemp":   "disk",
+// cpuChips are hwmon names that mean "the processor" — their readings wear
+// the label "cpu" and their per-core rows collapse to package rows.
+var cpuChips = map[string]bool{
+	"coretemp": true, "k10temp": true, "zenpower": true, "cpu_thermal": true,
 }
 
-// ParseHwmonTemp digests `grep -H .` output over hwmon name/temp files
-// ("path:value" lines) and returns the hottest reading among preferred
-// chips, in whole °C, labeled by chip kind.
-func ParseHwmonTemp(s string) (c int, src string, ok bool) {
-	chip := map[string]string{} // hwmon dir → chip name
-	type reading struct {
-		dir   string
-		milli int64
+// driveChips are hwmon names whose readings belong to a specific disk, not
+// the sensors list — they join the drive roster via their device link.
+var driveChips = map[string]bool{"nvme": true, "drivetemp": true}
+
+func IsCPUChip(name string) bool   { return cpuChips[name] }
+func IsDriveChip(name string) bool { return driveChips[name] }
+
+// HwmonTemp is one labeled reading of a chip.
+type HwmonTemp struct {
+	Label  string
+	MilliC int64
+}
+
+// HwmonChip is one sensor chip with all its temperature readings. Every
+// chip is surfaced — the rule since the protan round: anything eligible
+// for the host line must be a named, explorable row in the host view.
+type HwmonChip struct {
+	Dir   string // /sys/class/hwmon/hwmonN — the device-link join key
+	Name  string
+	Temps []HwmonTemp
+}
+
+// MaxC returns the chip's hottest reading in whole °C.
+func (c *HwmonChip) MaxC() int {
+	var best int64 = -1 << 62
+	for _, t := range c.Temps {
+		if t.MilliC > best {
+			best = t.MilliC
+		}
 	}
-	var temps []reading
+	if best == -1<<62 {
+		return -1
+	}
+	return int((best + 500) / 1000)
+}
+
+// ParseHwmon digests `grep -H .` output over hwmon name/temp files
+// ("path:value" lines) into chips with paired labels, ordered by dir.
+func ParseHwmon(s string) []HwmonChip {
+	type acc struct {
+		name   string
+		inputs map[string]int64
+		labels map[string]string
+	}
+	chips := map[string]*acc{}
+	get := func(dir string) *acc {
+		if chips[dir] == nil {
+			chips[dir] = &acc{inputs: map[string]int64{}, labels: map[string]string{}}
+		}
+		return chips[dir]
+	}
 	for _, line := range strings.Split(s, "\n") {
 		i := strings.LastIndexByte(line, ':')
 		if i <= 0 {
@@ -96,27 +131,52 @@ func ParseHwmonTemp(s string) (c int, src string, ok bool) {
 		dir, file := path[:j], path[j+1:]
 		switch {
 		case file == "name":
-			chip[dir] = val
+			get(dir).name = val
 		case strings.HasPrefix(file, "temp") && strings.HasSuffix(file, "_input"):
-			if v, err := strconv.ParseInt(val, 10, 64); err == nil {
-				temps = append(temps, reading{dir, v})
+			// non-positive readings are sensor fiction (virtual nvme
+			// targets report sub-zero composites) — drop them at the door
+			if v, err := strconv.ParseInt(val, 10, 64); err == nil && v > 0 {
+				get(dir).inputs[strings.TrimSuffix(file, "_input")] = v
 			}
+		case strings.HasPrefix(file, "temp") && strings.HasSuffix(file, "_label"):
+			get(dir).labels[strings.TrimSuffix(file, "_label")] = val
 		}
 	}
-	var best int64 = -1 << 62
-	for _, r := range temps {
-		kind, pref := hwmonPreferred[chip[r.dir]]
-		if !pref {
-			continue
-		}
-		if r.milli > best {
-			best, src, ok = r.milli, kind, true
-		}
+	var dirs []string
+	for d := range chips {
+		dirs = append(dirs, d)
 	}
-	if !ok {
-		return 0, "", false
+	sort.Slice(dirs, func(i, j int) bool {
+		// hwmon10 sorts after hwmon9, not after hwmon1
+		a, b := dirs[i], dirs[j]
+		if len(a) != len(b) {
+			return len(a) < len(b)
+		}
+		return a < b
+	})
+	var out []HwmonChip
+	for _, d := range dirs {
+		a := chips[d]
+		if len(a.inputs) == 0 {
+			continue // chips without temperatures (AC, BAT) are not sensors here
+		}
+		var keys []string
+		for k := range a.inputs {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if len(keys[i]) != len(keys[j]) {
+				return len(keys[i]) < len(keys[j])
+			}
+			return keys[i] < keys[j]
+		})
+		chip := HwmonChip{Dir: d, Name: a.name}
+		for _, k := range keys {
+			chip.Temps = append(chip.Temps, HwmonTemp{Label: a.labels[k], MilliC: a.inputs[k]})
+		}
+		out = append(out, chip)
 	}
-	return int((best + 500) / 1000), src, true
+	return out
 }
 
 // ParseZfsVersion splits `zfs version` output into userland and kmod

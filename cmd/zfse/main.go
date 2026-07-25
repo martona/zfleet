@@ -92,6 +92,8 @@ func main() {
 			if arc, iostat, objsets, err := s.Src.StatTexts(ctx); err == nil {
 				m.ApplyStatData(s.Name, arc, iostat, objsets)
 			}
+			al, sysBlock, lsblk, hwmonDev := s.Src.DiskTexts(ctx)
+			m.ApplyDisks(s.Name, al, sysBlock, lsblk, hwmonDev)
 			up, load, stat, hwmon := s.Src.HostTexts(ctx)
 			m.ApplyHostVitals(s.Name, up, load, stat, hwmon)
 			ver, kernel, osrel := s.Src.InfoTexts(ctx)

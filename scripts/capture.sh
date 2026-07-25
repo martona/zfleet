@@ -54,6 +54,13 @@ fs="$(zfs list -H -t filesystem -o name,mounted | awk '$2 == "yes" { print $1; e
 vol="$(zfs list -H -t volume -o name | head -1)"
 [ -n "$vol" ] && run zfs-get-all-zvol.out zfs get -Hp all "$vol"
 
+# disk surfaces (drive-health round): the alias universe, the kernel
+# block-device map, the disk inventory, and hwmon chip→device links
+sh_run disk-aliases.out 'find /dev/disk -type l -printf "%p %l\n" 2>/dev/null'
+sh_run sys-block.out 'find /sys/class/block -maxdepth 1 -type l -printf "%f %l\n" 2>/dev/null'
+sh_run lsblk-disks.out 'lsblk -bdP -o NAME,SIZE,ROTA,MODEL,SERIAL 2>/dev/null'
+sh_run hwmon-dev.out 'for h in /sys/class/hwmon/hwmon*; do [ -e "$h/device" ] && echo "$h $(readlink -f "$h/device")"; done; true'
+
 # host surfaces (multi-host round): vitals + identity
 run uptime.out cat /proc/uptime
 run loadavg.out cat /proc/loadavg

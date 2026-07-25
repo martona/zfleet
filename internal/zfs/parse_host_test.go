@@ -38,30 +38,28 @@ func TestParseCPUStat(t *testing.T) {
 	}
 }
 
-func TestParseHwmonTemp(t *testing.T) {
-	// the fixture's hottest sensor is the 10GbE NIC at 64°C; the hottest
-	// preferred one is Xeon package 1 at 45°C — the NIC must lose
-	c, src, ok := ParseHwmonTemp(readFixture(t, filepath.Join(fixtureDirMH, "hwmon.out")))
-	if !ok || c != 45 || src != "cpu" {
-		t.Errorf("hwmon = (%d, %q, %v), want (45, cpu, true)", c, src, ok)
+func TestParseHwmon(t *testing.T) {
+	chips := ParseHwmon(readFixture(t, filepath.Join(fixtureDirMH, "hwmon.out")))
+	// enp9s0 (NIC) + two coretemp packages; since the protan round every
+	// chip is surfaced — the NIC is a named row now, not a silent loser
+	if len(chips) != 3 {
+		t.Fatalf("chips = %d, want 3", len(chips))
 	}
-}
-
-func TestParseHwmonTempSynthetic(t *testing.T) {
-	nvme := "/sys/class/hwmon/hwmon3/name:nvme\n" +
-		"/sys/class/hwmon/hwmon3/temp1_input:53850\n" +
-		"/sys/class/hwmon/hwmon4/name:k10temp\n" +
-		"/sys/class/hwmon/hwmon4/temp1_input:51000\n"
-	if c, src, ok := ParseHwmonTemp(nvme); !ok || c != 54 || src != "nvme" {
-		t.Errorf("nvme case = (%d, %q, %v), want (54, nvme, true)", c, src, ok)
+	if chips[0].Name != "enp9s0" || chips[0].MaxC() != 64 {
+		t.Errorf("chip0 = %s %d°C, want enp9s0 64°C", chips[0].Name, chips[0].MaxC())
 	}
-	nicOnly := "/sys/class/hwmon/hwmon0/name:enp9s0\n" +
-		"/sys/class/hwmon/hwmon0/temp1_input:64421\n"
-	if _, _, ok := ParseHwmonTemp(nicOnly); ok {
-		t.Error("a NIC alone must not become the host temperature")
+	if chips[2].Name != "coretemp" || chips[2].MaxC() != 45 {
+		t.Errorf("chip2 = %s %d°C, want coretemp 45°C", chips[2].Name, chips[2].MaxC())
 	}
-	if _, _, ok := ParseHwmonTemp(""); ok {
-		t.Error("empty input must report no temperature")
+	// labels pair with their inputs: temp1 of coretemp.1 is Package id 1
+	if chips[2].Temps[0].Label != "Package id 1" {
+		t.Errorf("label = %q, want Package id 1", chips[2].Temps[0].Label)
+	}
+	if got := ParseHwmon(""); len(got) != 0 {
+		t.Error("empty input must yield no chips")
+	}
+	if !IsCPUChip("coretemp") || IsCPUChip("nvme") || !IsDriveChip("drivetemp") {
+		t.Error("chip classification broken")
 	}
 }
 

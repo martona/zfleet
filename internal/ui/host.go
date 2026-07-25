@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"time"
 
 	"github.com/martona/zfs-explorer/internal/collect"
@@ -85,6 +86,17 @@ type hostState struct {
 	dsIOHist   map[string][]zfs.IORates
 	objsetPrev map[string]zfs.ObjsetIO
 	objsetAt   time.Time
+
+	// disk layer: inventory, alias/block maps for vdev resolution, and
+	// the hwmon chip→disk joins that turn chip readings into drive temps
+	disks     []zfs.Disk
+	aliases   map[string]string
+	blocks    map[string]zfs.BlockNode
+	chipDisk  map[string]string // hwmon dir → disk node
+	vdevDisk  map[string]string // status leaf name → disk node
+	chips     []zfs.HwmonChip   // latest hwmon readings, all chips
+	diskPend  bool
+	haveDisks bool
 
 	// dataset caches shared by the tree screen and the drill browser
 	dsTrees     map[string]*zfs.DatasetTree
@@ -221,9 +233,107 @@ func (h *hostState) applyVitals(uptime, loadavg, stat, hwmon string) {
 		}
 		h.cpuBusy, h.cpuTotal = busy, total
 	}
-	if c, src, ok := zfs.ParseHwmonTemp(hwmon); ok {
-		h.tempC, h.tempSrc, h.haveTemp = c, src, true
+	if chips := zfs.ParseHwmon(hwmon); len(chips) > 0 {
+		h.chips = chips
+		h.refreshTemps()
 	}
+}
+
+// refreshTemps distributes the latest chip readings: drive-linked chips
+// update their disk's temperature, and the host line takes the hottest
+// reading across sensors and drives alike — whatever is cooking, it is a
+// named, explorable row in the host view.
+func (h *hostState) refreshTemps() {
+	best, bestSrc := -1, ""
+	for i := range h.disks {
+		h.disks[i].TempC = -1
+	}
+	for _, c := range h.chips {
+		mc := c.MaxC()
+		if mc < 0 {
+			continue
+		}
+		if node, ok := h.chipDisk[c.Dir]; ok {
+			for i := range h.disks {
+				if h.disks[i].Node == node && mc > h.disks[i].TempC {
+					h.disks[i].TempC, h.disks[i].TempSrc = mc, c.Name
+				}
+			}
+			if mc > best {
+				best, bestSrc = mc, node
+			}
+			continue
+		}
+		if mc > best {
+			best, bestSrc = mc, c.Name
+			if zfs.IsCPUChip(c.Name) {
+				bestSrc = "cpu"
+			}
+		}
+	}
+	if best >= 0 {
+		h.tempC, h.tempSrc, h.haveTemp = best, bestSrc, true
+	}
+}
+
+// applyDisks ingests the DiskTexts surfaces and joins everything: alias
+// universe, block map, inventory, chip→disk links, vdev resolution.
+func (h *hostState) applyDisks(aliases, sysBlock, lsblk, hwmonDev string) {
+	h.aliases = zfs.ParseDiskAliases(aliases)
+	h.blocks = zfs.ParseSysBlock(sysBlock)
+	h.disks = zfs.ParseLsblkDisks(lsblk)
+	for i := range h.disks {
+		h.disks[i].DevPath = h.blocks[h.disks[i].Node].DevPath
+	}
+	h.chipDisk = map[string]string{}
+	for dir, dev := range zfs.ParseHwmonDevs(hwmonDev) {
+		for _, d := range h.disks {
+			if d.DevPath != "" && strings.HasPrefix(d.DevPath, dev+"/") {
+				h.chipDisk[dir] = d.Node
+				break
+			}
+		}
+	}
+	h.haveDisks = len(h.disks) > 0 || len(h.aliases) > 0
+	h.resolveVdevs()
+	h.refreshTemps()
+}
+
+// resolveVdevs maps every pool leaf to its physical disk; called when
+// either side of the join (pools, aliases) arrives.
+func (h *hostState) resolveVdevs() {
+	if h.aliases == nil {
+		return
+	}
+	h.vdevDisk = map[string]string{}
+	for _, p := range h.pools {
+		for _, c := range p.Classes {
+			for _, v := range c.Vdevs {
+				for _, leaf := range v.Leaves() {
+					if len(leaf.Children) > 0 {
+						continue
+					}
+					if node := zfs.ResolveVdev(leaf.Name, h.aliases, h.blocks); node != "" {
+						h.vdevDisk[leaf.Name] = node
+					}
+				}
+			}
+		}
+	}
+}
+
+// diskFor returns the resolved disk for a status leaf name.
+func (h *hostState) diskFor(leaf string) *zfs.Disk {
+	node, ok := h.vdevDisk[leaf]
+	if !ok {
+		return nil
+	}
+	for i := range h.disks {
+		if h.disks[i].Node == node {
+			return &h.disks[i]
+		}
+	}
+	return nil
 }
 
 // applyInfo ingests the once-per-connect identity surfaces.

@@ -189,8 +189,19 @@ func (s Ssh) HostTexts(ctx context.Context) (string, string, string, string) {
 	}
 	load, _ := s.run(ctx, "cat /proc/loadavg")
 	stat, _ := s.run(ctx, "cat /proc/stat")
-	hwmon, _ := s.run(ctx, "grep -H . /sys/class/hwmon/hwmon*/name /sys/class/hwmon/hwmon*/temp*_input 2>/dev/null")
+	hwmon, _ := s.run(ctx, "grep -H . /sys/class/hwmon/hwmon*/name /sys/class/hwmon/hwmon*/temp*_input /sys/class/hwmon/hwmon*/temp*_label 2>/dev/null")
 	return up, load, stat, hwmon
+}
+
+func (s Ssh) DiskTexts(ctx context.Context) (string, string, string, string) {
+	aliases, err := s.run(ctx, `find /dev/disk -type l -printf "%p %l\n" 2>/dev/null`)
+	if err != nil && transportDown(err) {
+		return "", "", "", ""
+	}
+	sysBlock, _ := s.run(ctx, `find /sys/class/block -maxdepth 1 -type l -printf "%f %l\n" 2>/dev/null`)
+	lsblk, _ := s.run(ctx, "lsblk -bdP -o NAME,SIZE,ROTA,MODEL,SERIAL 2>/dev/null")
+	hwmonDev, _ := s.run(ctx, `for h in /sys/class/hwmon/hwmon*; do [ -e "$h/device" ] && echo "$h $(readlink -f "$h/device")"; done; true`)
+	return aliases, sysBlock, lsblk, hwmonDev
 }
 
 func (s Ssh) InfoTexts(ctx context.Context) (string, string, string) {
