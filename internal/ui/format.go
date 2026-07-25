@@ -7,7 +7,9 @@ import (
 )
 
 // ANSI palette colors only, so the user's terminal theme decides the actual
-// look.
+// look — with one deliberate exception: sparkline riser ink is 256-color,
+// because the 16-palette offers nothing between shout and mute. Old
+// terminals degrade to the nearest ANSI color.
 var (
 	styGood    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
@@ -18,6 +20,26 @@ var (
 	styBar     = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	styBarWarn = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styBarBad  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+)
+
+// sparkFam is riser ink by intensity — trickle, mid, burst — so big moves
+// glow hotter (btop's gradient, quantized to our three riser levels).
+// Reads wear steel, writes wear gold; the dead family renders frozen
+// history on unreachable hosts. Baseline dots are always muted.
+type sparkFam [3]lipgloss.Style
+
+var (
+	sparkGold = sparkFam{
+		lipgloss.NewStyle().Foreground(lipgloss.Color("136")),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("178")),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
+	}
+	sparkSteel = sparkFam{
+		lipgloss.NewStyle().Foreground(lipgloss.Color("67")),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("110")),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("153")),
+	}
+	sparkDead = sparkFam{styDim, styDim, styDim}
 )
 
 func healthStyle(state string) lipgloss.Style {
@@ -63,15 +85,21 @@ func elastic(widths map[string]int, key, s string) string {
 	return padL(s, widths[key])
 }
 
-var sparkRunes = []rune("▁▂▃▄▅▆▇█")
+// Sparklines are btop-style braille: each cell is a 2×4 dot matrix, so one
+// character carries two samples at four levels — double the density of
+// block glyphs at a fraction of the ink. An idle sample keeps a single
+// muted baseline dot (calm, not absence — absence stays blank), and any
+// nonzero sample rises at least one dot above the floor. History shorter
+// than the window left-pads with blanks so the newest sample stays pinned
+// at the right edge.
+var (
+	brailleL = [5]rune{0, 0x40, 0x44, 0x46, 0x47} // left column, bottom-up fill
+	brailleR = [5]rune{0, 0x80, 0xA0, 0xB0, 0xB8} // right column
+)
 
-// sparkline renders values as a mini bar chart scaled to the window's max,
-// always exactly width cells: history shorter than the window left-pads
-// with blanks so the newest sample stays pinned at the right edge and
-// columns never creep as samples accumulate.
-func sparkline(vals []int64, width int) string {
-	if len(vals) > width {
-		vals = vals[len(vals)-width:]
+func sparklineFam(fam sparkFam, vals []int64, width int) string {
+	if n := 2 * width; len(vals) > n {
+		vals = vals[len(vals)-n:]
 	}
 	var max int64
 	for _, v := range vals {
@@ -79,15 +107,59 @@ func sparkline(vals []int64, width int) string {
 			max = v
 		}
 	}
-	var b strings.Builder
-	for _, v := range vals {
-		i := 0
-		if max > 0 {
-			i = int(v * int64(len(sparkRunes)-1) / max)
+	lvl := func(v int64) int {
+		if v <= 0 {
+			return 1
 		}
-		b.WriteRune(sparkRunes[i])
+		l := 2 + int(v*3/max)
+		if l > 4 {
+			l = 4
+		}
+		return l
 	}
-	return rep(" ", width-len(vals)) + styDim.Render(b.String())
+	// a cell's ink follows its hotter sample; -1 = baseline-only, muted
+	shade := func(l, r int) int {
+		if r > l {
+			l = r
+		}
+		return l - 2
+	}
+	var out strings.Builder
+	out.WriteString(rep(" ", width-(len(vals)+1)/2))
+	var run strings.Builder
+	runShade := -2
+	flush := func() {
+		if run.Len() == 0 {
+			return
+		}
+		if runShade < 0 {
+			out.WriteString(styDim.Render(run.String()))
+		} else {
+			out.WriteString(fam[runShade].Render(run.String()))
+		}
+		run.Reset()
+	}
+	cell := func(bits rune, sh int) {
+		if sh != runShade {
+			flush()
+			runShade = sh
+		}
+		run.WriteRune(0x2800 | bits)
+	}
+	i := 0
+	if len(vals)%2 == 1 {
+		// odd history: the oldest cell carries one sample, right column,
+		// so the newest stays glued to the right edge
+		l := lvl(vals[0])
+		cell(brailleR[l], shade(0, l))
+		i = 1
+	}
+	for ; i < len(vals); i += 2 {
+		l, r := lvl(vals[i]), lvl(vals[i+1])
+		cell(brailleL[l]|brailleR[r], shade(l, r))
+	}
+	flush()
+	return out.String()
 }
 
 // dimUnit dims the trailing unit of a readout ("1.88G", "43%") so the

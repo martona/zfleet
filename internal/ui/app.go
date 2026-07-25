@@ -263,8 +263,9 @@ func (m *Model) MarkHostLive(host string) {
 	}
 }
 
-// 32 samples at the 2s stat tick ≈ a one-minute sparkline window
-const dsIOHistLen = 32
+// 64 samples at the 2s stat tick ≈ a two-minute window; braille sparklines
+// pack two samples per cell, so a full-width line shows all of it
+const dsIOHistLen = 64
 
 // SetSize sets the frame size directly (used by --dump).
 func (m *Model) SetSize(w, h int) { m.w, m.h = w, h }

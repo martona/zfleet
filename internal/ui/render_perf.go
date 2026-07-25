@@ -156,7 +156,7 @@ func perfPane(m *Model, w int) []string {
 		rollHit = fmt.Sprintf("%.1f%%", rollPct)
 	}
 	add(" " + styBold.Render("arc") + "   " + zfs.NiceBytes(h.arc.Size) + " / " +
-		zfs.NiceBytes(h.arc.CMax) + " · hit " + rollHit + " " + sparkline(h.hitHist, 8) +
+		zfs.NiceBytes(h.arc.CMax) + " · hit " + rollHit + " " + sparklineFam(sparkSteel, h.hitHist, 8) +
 		"   mru " + zfs.NiceBytes(arc["mru_size"]) + " · mfu " + zfs.NiceBytes(arc["mfu_size"]))
 	l2 := ""
 	if arc["l2_size"] > 0 {
@@ -190,7 +190,7 @@ func perfPane(m *Model, w int) []string {
 		styDim.Render(" · quiesce ") + zfs.NiceNS(sum.QAvg) +
 		styDim.Render(" · wait ") + zfs.NiceNS(sum.WAvg) +
 		styDim.Render(" · sync ") + zfs.NiceNS(sum.SAvg) +
-		"   " + styDim.Render("sync ") + sparkline(sum.SyncTimes, 10))
+		"   " + styDim.Render("sync ") + sparklineFam(sparkGold, sum.SyncTimes, 10))
 
 	delayRate := m.perfRate(m.perf.dmu, m.perf.dmuPrev, "dmu_tx_dirty_delay")
 	throttle := fmt.Sprintf(" %.1f delays/s", delayRate)

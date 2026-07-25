@@ -88,6 +88,16 @@ func niceAge(d time.Duration) string {
 	}
 }
 
+// ioRate renders one right-aligned rate readout: idle recedes wholesale,
+// motion keeps bright digits over a dim unit.
+func ioRate(rate int64, w int) string {
+	cell := padL(zfs.NiceBytes(rate)+"/s", w)
+	if rate == 0 {
+		return styDim.Render(cell)
+	}
+	return dimUnit(cell)
+}
+
 // hostLiveIO sums the host's current pool rates.
 func hostLiveIO(h *hostState) (r, w int64) {
 	for _, io := range h.io {
@@ -190,15 +200,15 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 	if h.haveArc {
 		hit := ""
 		if dh, dm := h.arc.Hits-h.arcPrev.Hits, h.arc.Misses-h.arcPrev.Misses; dh+dm > 0 {
-			hit = fmt.Sprintf(" · hit %.1f%% ", 100*float64(dh)/float64(dh+dm)) + sparkline(h.hitHist, 8)
+			hit = fmt.Sprintf(" · hit %.1f%% ", 100*float64(dh)/float64(dh+dm)) + sparklineFam(sparkSteel, h.hitHist, 8)
 		}
 		lines = append(lines, " arc  "+zfs.NiceBytes(h.arc.Size)+" / "+zfs.NiceBytes(h.arc.CMax)+hit)
 	}
 	if len(h.hostIOHist) > 0 {
 		r, wr := hostLiveIO(h)
 		rh, wh := hostIORings(h)
-		lines = append(lines, " io   r "+padL(zfs.NiceBytes(r)+"/s", 8)+" "+sparkline(rh, 10)+
-			"   w "+padL(zfs.NiceBytes(wr)+"/s", 8)+" "+sparkline(wh, 10))
+		lines = append(lines, " io   r "+ioRate(r, 8)+" "+sparklineFam(sparkSteel, rh, 10)+
+			"   w "+ioRate(wr, 8)+" "+sparklineFam(sparkGold, wh, 10))
 	}
 	lines = append(lines, "")
 

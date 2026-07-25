@@ -501,8 +501,8 @@ func dsInspector(m *Model, h *hostState, d *zfs.Dataset, w int) []string {
 	sub, rh, wh, loaded := h.subtreeIO(d)
 	switch {
 	case loaded > 0:
-		lines = append(lines, " io   r "+padL(zfs.NiceBytes(sub.RBw)+"/s", 8)+" "+sparkline(rh, 10)+
-			"   w "+padL(zfs.NiceBytes(sub.WBw)+"/s", 8)+" "+sparkline(wh, 10))
+		lines = append(lines, " io   r "+ioRate(sub.RBw, 8)+" "+sparklineFam(sparkSteel, rh, 10)+
+			"   w "+ioRate(sub.WBw, 8)+" "+sparklineFam(sparkGold, wh, 10))
 	case h.objsetPrev != nil:
 		reason := "dataset not loaded"
 		if len(d.Children) > 0 {

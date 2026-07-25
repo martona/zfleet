@@ -200,8 +200,8 @@ func overviewPane(m *Model, w, h int) []string {
 		nameW = max
 	}
 	sparkW := (w - 2 - nameW - treeColsW - 2*rateW - 6) / 2
-	if sparkW > dsIOHistLen {
-		sparkW = dsIOHistLen
+	if sparkW > dsIOHistLen/2 { // braille: two samples per cell
+		sparkW = dsIOHistLen / 2
 	}
 	if sparkW < 3 {
 		sparkW = 0
@@ -211,19 +211,26 @@ func overviewPane(m *Model, w, h int) []string {
 		cellW += 1 + sparkW
 	}
 
-	ioCell := func(rate int64, hist []int64, ok bool) string {
+	ioCell := func(rate int64, hist []int64, ok bool, fam sparkFam) string {
 		if !ok {
 			// stale rates are lies and blank to "-", but a frozen sparkline
 			// is history — it stays, dimmed, right where it stopped
-			cell := padL("-", rateW)
+			cell := styDim.Render(padL("-", rateW))
 			if sparkW > 0 && len(hist) > 0 {
-				return cell + " " + sparkline(hist, sparkW)
+				return cell + " " + sparklineFam(sparkDead, hist, sparkW)
 			}
 			return cell + rep(" ", cellW-rateW)
 		}
+		// an idle rate recedes wholesale; a moving one keeps bright digits
+		// over a dim unit
 		cell := padL(zfs.NiceBytes(rate)+"/s", rateW)
+		if rate == 0 {
+			cell = styDim.Render(cell)
+		} else {
+			cell = dimUnit(cell)
+		}
 		if sparkW > 0 {
-			cell += " " + sparkline(hist, sparkW)
+			cell += " " + sparklineFam(fam, hist, sparkW)
 		}
 		return cell
 	}
@@ -240,7 +247,7 @@ func overviewPane(m *Model, w, h int) []string {
 				rh, wh := hostIORings(r.host)
 				rbw, wbw := hostLiveIO(r.host)
 				live := rowLive(r.host) && len(r.host.hostIOHist) > 0
-				row += "  " + ioCell(rbw, rh, live) + "  " + ioCell(wbw, wh, live)
+				row += "  " + ioCell(rbw, rh, live, sparkSteel) + "  " + ioCell(wbw, wh, live, sparkGold)
 			}
 		case rPool:
 			io, ok := r.host.io[r.pool.Name]
@@ -252,11 +259,11 @@ func overviewPane(m *Model, w, h int) []string {
 				rh[j] = s.RBw
 				wh[j] = s.WBw
 			}
-			row += "  " + ioCell(io.RBw, rh, ok) + "  " + ioCell(io.WBw, wh, ok)
+			row += "  " + ioCell(io.RBw, rh, ok, sparkSteel) + "  " + ioCell(io.WBw, wh, ok, sparkGold)
 		case rDataset:
 			sub, rh, wh, loaded := r.host.subtreeIO(r.ds)
 			live := loaded > 0 && rowLive(r.host)
-			row += "  " + ioCell(sub.RBw, rh, live) + "  " + ioCell(sub.WBw, wh, live)
+			row += "  " + ioCell(sub.RBw, rh, live, sparkSteel) + "  " + ioCell(sub.WBw, wh, live, sparkGold)
 		}
 		if i == cur {
 			// the wide view's cursor only ever rests on the overview row
