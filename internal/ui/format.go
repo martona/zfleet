@@ -90,6 +90,20 @@ func sparkline(vals []int64, width int) string {
 	return rep(" ", width-len(vals)) + styDim.Render(b.String())
 }
 
+// dimUnit dims the trailing unit of a readout ("1.88G", "43%") so the
+// digits carry the line and adjacent numeric columns separate visually.
+// Safe on right-padded input — the suffix scan stops at the digits.
+func dimUnit(s string) string {
+	i := len(s)
+	for i > 0 && (s[i-1] < '0' || s[i-1] > '9') {
+		i--
+	}
+	if i == len(s) {
+		return s
+	}
+	return s[:i] + styDim.Render(s[i:])
+}
+
 // padR pads or truncates a *plain* (unstyled) string to exactly w cells.
 func padR(s string, w int) string {
 	d := w - lipgloss.Width(s)

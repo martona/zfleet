@@ -63,6 +63,20 @@ func hostOutage(h *hostState) string {
 	return txt
 }
 
+// hostOutageCompact is the row-width outage form — terse enough to always
+// fit the shared cells, while hostOutage keeps the full phrasing for the
+// inspector and strip.
+func hostOutageCompact(h *hostState) string {
+	txt := "down"
+	if age := h.outageAge(); age > 0 {
+		txt += " " + niceAge(age)
+	}
+	if wait := time.Until(h.nextTry); wait > time.Second {
+		txt += fmt.Sprintf(" · retry %ds", int(wait.Seconds()))
+	}
+	return txt
+}
+
 func niceAge(d time.Duration) string {
 	switch {
 	case d < time.Minute:

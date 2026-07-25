@@ -104,12 +104,20 @@ func frame(m *Model) string {
 		return b.String()
 	}
 
-	leftW := 36
+	var leftW int
 	if m.mode == modeBrowser {
 		leftW = 46
-	}
-	if leftW > m.w*45/100 {
-		leftW = m.w * 45 / 100
+		if leftW > m.w*45/100 {
+			leftW = m.w * 45 / 100
+		}
+	} else {
+		// the tree's divider sits exactly where the overview's io columns
+		// begin: same rows, same geometry, no shift on mode change. It
+		// moves only when expansion changes what is visible.
+		leftW = m.treeLeftWidth()
+		if leftW > m.w/2 {
+			leftW = m.w / 2
+		}
 	}
 	rightW := m.w - leftW - 3
 
