@@ -40,11 +40,19 @@ func frame(m *Model) string {
 	if m.w < 70 || m.h < 16 {
 		return fmt.Sprintf("zfse needs at least 70x16 (have %dx%d)", m.w, m.h)
 	}
-	if len(m.pools) == 0 {
-		if m.lastErr != nil {
-			return "zfse: " + m.lastErr.Error()
+	if !m.multiHost {
+		// single host: nothing to show until its pools land. A fleet
+		// renders immediately — host rows carry their own state.
+		h := m.hosts[0]
+		if len(h.pools) == 0 {
+			if h.lastErr != nil {
+				return "zfse: " + h.lastErr.Error()
+			}
+			if h.errText != "" {
+				return "zfse: " + h.errText
+			}
+			return "collecting…"
 		}
-		return "collecting…"
 	}
 
 	contentH := m.h - 4 // top border, divider, strip, keyed bottom border
@@ -65,9 +73,21 @@ func frame(m *Model) string {
 		heading := "overview"
 		if m.mode == modePerf {
 			heading = "performance · " + m.perf.pool
-			lines = perfPane(m, inner, contentH)
+			if m.multiHost && m.perf.host != nil {
+				heading = "performance · " + m.perf.host.name + ":" + m.perf.pool
+			}
+			lines = perfPane(m, inner)
+			key := "p|" + m.perf.pool
+			if m.perf.host != nil {
+				key = "p|" + m.perf.host.name + "\x00" + m.perf.pool
+			}
+			if key != m.panelKey {
+				m.panelKey, m.panelScroll = key, 0
+			}
+			lines, m.panelScroll, m.rightOverflow = scrollWindow(lines, m.panelScroll, contentH)
 		} else {
 			lines = overviewPane(m, inner, contentH)
+			m.rightOverflow = false
 		}
 		var b strings.Builder
 		b.WriteString("┌" + title(heading, inner) + "┐\n")
@@ -95,28 +115,49 @@ func frame(m *Model) string {
 
 	var leftTitle, rightTitle string
 	var left, right []string
+	var panelKey string
 	if m.mode == modeBrowser {
 		leftTitle = m.breadcrumb()
 		bsel := m.brSelected()
-		rightTitle = brRightTitle(bsel)
+		rightTitle = brRightTitle(m, bsel)
 		if n := len(m.br.selSnaps); n > 0 {
 			rightTitle = fmt.Sprintf("selection (%d)", n)
 		}
 		left = brLeftPane(m, leftW, contentH)
-		right = brInspector(m, bsel, rightW, contentH)
+		right = brInspector(m, bsel, rightW)
+		container := ""
+		if c := m.brContainer(); c != nil {
+			container = c.Name
+		}
+		host := ""
+		if m.br.host != nil {
+			host = m.br.host.name
+		}
+		panelKey = fmt.Sprintf("b|%s|%s|%s|%d", host, container, bsel.id, m.br.selGen)
 	} else {
 		row := m.treeSelected()
 		leftTitle = "pools"
+		if m.multiHost {
+			leftTitle = "hosts"
+		}
 		left = treeNarrowPane(m, leftW, contentH)
 		switch row.kind {
+		case rHost:
+			rightTitle = row.host.name
+			right = hostInspector(m, row.host, rightW)
 		case rPool:
 			rightTitle = row.pool.Name
-			right = inspector(m, row.pool, rightW, contentH)
+			right = inspector(m, row.host, row.pool, rightW)
 		case rDataset:
 			rightTitle = row.ds.Base()
-			right = clampLines(dsInspector(m, row.ds, rightW), contentH)
+			right = dsInspector(m, row.host, row.ds, rightW)
 		}
+		panelKey = "t|" + m.treeSel
 	}
+	if panelKey != m.panelKey {
+		m.panelKey, m.panelScroll = panelKey, 0
+	}
+	right, m.panelScroll, m.rightOverflow = scrollWindow(right, m.panelScroll, contentH)
 
 	var b strings.Builder
 	b.WriteString("┌" + title(leftTitle, leftW) + "┬" + title(rightTitle, rightW) + "┐\n")
@@ -136,7 +177,7 @@ func frame(m *Model) string {
 	return b.String()
 }
 
-func inspector(m *Model, p *zfs.Pool, w, h int) []string {
+func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	var head []string
 
 	errTxt := p.ErrorsLine
@@ -188,8 +229,8 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 	// raw-vs-charged allocation overhead against the geometry baseline —
 	// meaningful on raidz, where the pool layer counts parity and padding
 	// but datasets are charged deflated bytes
-	if rs, ok := m.rootStats[p.Name]; ok && rs.Used > 0 && p.Alloc > 0 {
-		if vw, par, ash, geo := m.poolGeometry(p.Name); geo {
+	if rs, ok := h.rootStats[p.Name]; ok && rs.Used > 0 && p.Alloc > 0 {
+		if vw, par, ash, geo := h.poolGeometry(p.Name); geo {
 			actual := float64(p.Alloc) / float64(rs.Used)
 			base := zfs.RaidzRawPerCharged(vw, par, ash)
 			actualCell := fmt.Sprintf("×%.2f", actual)
@@ -202,7 +243,6 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 	}
 
 	lines = append(lines, "")
-	classLineCount := len(lines) - len(head)
 
 	// row layout: " " + name(nameW) + sum(9) + " " + state(10) + 5 + 6 + 6
 	nameW := w - 39
@@ -214,27 +254,21 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 	}
 	var topo []string
 	ashiftCell := ""
-	if a, ok := m.ashift[p.Name]; ok {
+	if a, ok := h.ashift[p.Name]; ok {
 		ashiftCell = styDim.Render("ashift " + strconv.Itoa(a))
 	}
 	topo = append(topo, " "+padR(ashiftCell, nameW+9)+styDim.Render(padR("STATE", 10)+padL("READ", 5)+padL("WRITE", 6)+padL("CKSUM", 6)))
 
-	anyCollapsed := false
+	// topology renders fully expanded — j/k scrolling replaced the whole
+	// collapse mechanism; parents keep the "N× size" summary in their sum
+	// column so nothing the collapsed rows used to say is lost
 	var walk func(v *zfs.Vdev, classPrefix string, depth int)
 	walk = func(v *zfs.Vdev, classPrefix string, depth int) {
-		expanded := len(v.Children) > 0 &&
-			(m.expandAll || !v.Healthy() || len(v.Children) <= 3)
 		display := classPrefix + v.Name
-		sum := ""
-		switch {
-		case expanded:
-			sum = "▾"
-		case len(v.Children) > 0:
+		sum := zfs.NiceBytes(v.Size)
+		if len(v.Children) > 0 {
 			leaves := v.Leaves()
 			sum = fmt.Sprintf("%d× %s", len(leaves), zfs.NiceBytes(leaves[0].Size))
-			anyCollapsed = true
-		default:
-			sum = zfs.NiceBytes(v.Size)
 		}
 		row := " " + rep("  ", depth) + padR(truncate(display, nameW-depth*2), nameW-depth*2) +
 			padL(sum, 9) + " " +
@@ -246,10 +280,8 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 			}
 		}
 		topo = append(topo, row)
-		if expanded {
-			for _, c := range v.Children {
-				walk(c, "", depth+1)
-			}
+		for _, c := range v.Children {
+			walk(c, "", depth+1)
 		}
 	}
 	for _, c := range p.Classes {
@@ -264,37 +296,44 @@ func inspector(m *Model, p *zfs.Pool, w, h int) []string {
 			walk(v, prefix, 0)
 		}
 	}
-	if anyCollapsed {
-		topo = append(topo, " "+styDim.Render("(t: expand disks)"))
-	} else if m.expandAll {
-		topo = append(topo, " "+styDim.Render("(t: auto-collapse)"))
-	}
-
-	// The io line must survive short terminals: give topology whatever
-	// height remains and elide its tail rather than the sections below it.
-	tail := 2 // blank + io line
-	budget := h - len(head) - classLineCount - tail
-	if budget < 2 {
-		budget = 2
-	}
-	if len(topo) > budget {
-		hidden := len(topo) - (budget - 1)
-		topo = append(topo[:budget-1],
-			" "+styDim.Render(fmt.Sprintf("… %d more rows", hidden)))
-	}
 	lines = append(lines, topo...)
 
 	lines = append(lines, "")
-	if r, ok := m.io[p.Name]; ok {
-		lines = append(lines, " io   r "+elastic(m.ioW, "rbw", zfs.NiceBytes(r.RBw)+"/s")+
-			" · "+elastic(m.ioW, "rops", opsCell(r.RBw, r.ROps))+
-			"    w "+elastic(m.ioW, "wbw", zfs.NiceBytes(r.WBw)+"/s")+
-			" · "+elastic(m.ioW, "wops", opsCell(r.WBw, r.WOps)))
+	if r, ok := h.io[p.Name]; ok {
+		lines = append(lines, " io   r "+elastic(h.ioW, "rbw", zfs.NiceBytes(r.RBw)+"/s")+
+			" · "+elastic(h.ioW, "rops", opsCell(r.RBw, r.ROps))+
+			"    w "+elastic(h.ioW, "wbw", zfs.NiceBytes(r.WBw)+"/s")+
+			" · "+elastic(h.ioW, "wops", opsCell(r.WBw, r.WOps)))
 	} else {
 		lines = append(lines, " io   "+styDim.Render("sampling…"))
 	}
 
-	return clampLines(lines, h)
+	return lines
+}
+
+// scrollWindow views h rows of a taller panel at the given offset, marking
+// hidden rows above and below. Returns the clamped offset and whether the
+// panel overflows at all.
+func scrollWindow(lines []string, off, h int) ([]string, int, bool) {
+	if len(lines) <= h || h < 2 {
+		return lines, 0, false
+	}
+	max := len(lines) - h
+	if off > max {
+		off = max
+	}
+	if off < 0 {
+		off = 0
+	}
+	out := make([]string, h)
+	copy(out, lines[off:off+h])
+	if off > 0 {
+		out[0] = " " + styDim.Render(fmt.Sprintf("… (%d above)", off))
+	}
+	if off < max {
+		out[h-1] = " " + styDim.Render(fmt.Sprintf("… (%d below)", max-off))
+	}
+	return out, off, true
 }
 
 // opsCell renders an ops/s figure, refusing to claim "0 ops/s" when bytes
@@ -308,34 +347,63 @@ func opsCell(bw, ops int64) string {
 	return zfs.NiceCount(ops) + " ops/s"
 }
 
+// stripHost resolves which host the vitals strip should reflect: the one
+// owning whatever the cursor is on.
+func (m *Model) stripHost() *hostState {
+	switch m.mode {
+	case modePerf:
+		if m.perf.host != nil {
+			return m.perf.host
+		}
+	case modeBrowser:
+		if m.br.host != nil {
+			return m.br.host
+		}
+	default:
+		if row := m.treeSelected(); row.host != nil {
+			return row.host
+		}
+	}
+	return m.hosts[0]
+}
+
 func strip(m *Model) string {
+	// on the overview the strip answers for the fleet; everywhere else it
+	// follows the selection's host
+	if m.multiHost && m.mode == modePools && m.treeSelected().kind == rOverview {
+		return fleetStrip(m)
+	}
+	h := m.stripHost()
 	var segs []string
 
-	if m.haveArc {
-		seg := " arc " + zfs.NiceBytes(m.arc.Size) + "/" + zfs.NiceBytes(m.arc.CMax)
-		dh := m.arc.Hits - m.arcPrev.Hits
-		dm := m.arc.Misses - m.arcPrev.Misses
+	arcSeg := "arc -"
+	if h.haveArc {
+		arcSeg = "arc " + zfs.NiceBytes(h.arc.Size) + "/" + zfs.NiceBytes(h.arc.CMax)
+		dh := h.arc.Hits - h.arcPrev.Hits
+		dm := h.arc.Misses - h.arcPrev.Misses
 		if dh+dm <= 0 {
-			dh, dm = m.arc.Hits, m.arc.Misses // no traffic in window: lifetime
+			dh, dm = h.arc.Hits, h.arc.Misses // no traffic in window: lifetime
 		}
 		if dh+dm > 0 {
-			seg += fmt.Sprintf(" · hit %.1f%%", 100*float64(dh)/float64(dh+dm))
+			arcSeg += fmt.Sprintf(" · hit %.1f%%", 100*float64(dh)/float64(dh+dm))
 		}
-		segs = append(segs, seg)
+	}
+	if m.multiHost {
+		segs = append(segs, " "+styBold.Render(h.name)+" · "+arcSeg)
 	} else {
-		segs = append(segs, " arc -")
+		segs = append(segs, " "+arcSeg)
 	}
 
 	var rbw, wbw int64
-	for _, r := range m.io {
+	for _, r := range h.io {
 		rbw += r.RBw
 		wbw += r.WBw
 	}
-	segs = append(segs, "Σ r "+elastic(m.stripW, "rbw", zfs.NiceBytes(rbw)+"/s")+
-		" w "+elastic(m.stripW, "wbw", zfs.NiceBytes(wbw)+"/s"))
+	segs = append(segs, "Σ r "+elastic(h.stripW, "rbw", zfs.NiceBytes(rbw)+"/s")+
+		" w "+elastic(h.stripW, "wbw", zfs.NiceBytes(wbw)+"/s"))
 
 	scans := []string{}
-	for _, p := range m.pools {
+	for _, p := range h.pools {
 		if p.Scan.State == zfs.ScanInProgress {
 			scans = append(scans, fmt.Sprintf("%s %s %.0f%%", p.Scan.Kind, p.Name, p.Scan.Percent))
 		}
@@ -346,25 +414,92 @@ func strip(m *Model) string {
 		segs = append(segs, styDim.Render("no scans running"))
 	}
 
-	worst := m.pools[0]
-	for _, p := range m.pools {
-		if zfs.StateRank(p.State) > zfs.StateRank(worst.State) {
-			worst = p
+	if len(h.pools) > 0 {
+		worst := h.pools[0]
+		for _, p := range h.pools {
+			if zfs.StateRank(p.State) > zfs.StateRank(worst.State) {
+				worst = p
+			}
+		}
+		if zfs.StateRank(worst.State) == 0 {
+			segs = append(segs, styGood.Render(fmt.Sprintf("%d pools ONLINE", len(h.pools))))
+		} else {
+			segs = append(segs, healthStyle(worst.State).Render(worst.Name+" "+worst.State))
 		}
 	}
-	if zfs.StateRank(worst.State) == 0 {
-		segs = append(segs, styGood.Render(fmt.Sprintf("%d pools ONLINE", len(m.pools))))
-	} else {
-		segs = append(segs, healthStyle(worst.State).Render(worst.Name+" "+worst.State))
-	}
 
-	if strings.HasPrefix(m.src.Name(), "replay") {
+	if h.conn == connDown {
+		segs = append(segs, styBad.Render("! "+hostOutage(h)))
+	}
+	if strings.HasPrefix(h.src.Name(), "replay") {
 		segs = append(segs, styDim.Render("[replay]"))
 	}
-	if m.lastErr != nil {
-		segs = append(segs, styBad.Render("! "+truncate(m.lastErr.Error(), 30)))
+	if h.lastErr != nil {
+		segs = append(segs, styBad.Render("! "+truncate(h.lastErr.Error(), 30)))
 	}
 
+	return strings.Join(segs, styDim.Render(" │ "))
+}
+
+// fleetStrip is the overview's strip: every host's io summed, every scan
+// anywhere, every outage — the whole estate at a glance.
+func fleetStrip(m *Model) string {
+	var segs []string
+
+	var rbw, wbw int64
+	pools, online := 0, 0
+	var worstPool *zfs.Pool
+	worstHost := ""
+	scans := []string{}
+	downs := []string{}
+	for _, h := range m.hosts {
+		if h.conn == connLive {
+			for _, r := range h.io {
+				rbw += r.RBw
+				wbw += r.WBw
+			}
+		}
+		if h.conn == connDown {
+			downs = append(downs, h.name)
+		}
+		for _, p := range h.pools {
+			pools++
+			if zfs.StateRank(p.State) == 0 {
+				online++
+			}
+			if worstPool == nil || zfs.StateRank(p.State) > zfs.StateRank(worstPool.State) {
+				worstPool, worstHost = p, h.name
+			}
+			if p.Scan.State == zfs.ScanInProgress {
+				scans = append(scans, fmt.Sprintf("%s %s:%s %.0f%%", p.Scan.Kind, h.name, p.Name, p.Scan.Percent))
+			}
+		}
+	}
+
+	segs = append(segs, " "+styBold.Render("fleet")+" · Σ r "+
+		elastic(m.fleetW, "rbw", zfs.NiceBytes(rbw)+"/s")+
+		" w "+elastic(m.fleetW, "wbw", zfs.NiceBytes(wbw)+"/s"))
+
+	if len(scans) > 0 {
+		segs = append(segs, styBold.Render(strings.Join(scans, ", ")))
+	} else {
+		segs = append(segs, styDim.Render("no scans running"))
+	}
+
+	if pools > 0 {
+		if online == pools {
+			segs = append(segs, styGood.Render(fmt.Sprintf("%d pools ONLINE", pools)))
+		} else {
+			segs = append(segs, healthStyle(worstPool.State).Render(worstHost+":"+worstPool.Name+" "+worstPool.State))
+		}
+	}
+
+	for _, name := range downs {
+		segs = append(segs, styBad.Render("! "+name+" unreachable"))
+	}
+	if strings.HasPrefix(m.hosts[0].src.Name(), "replay") {
+		segs = append(segs, styDim.Render("[replay]"))
+	}
 	return strings.Join(segs, styDim.Render(" │ "))
 }
 

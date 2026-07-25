@@ -44,6 +44,13 @@ type Source interface {
 	PerfTexts(ctx context.Context, pool string) (txgs, dmuTx, zil, params, iostatL string, err error)
 	// PoolProps returns `zpool get -Hp ashift` output.
 	PoolProps(ctx context.Context) (string, error)
+	// HostTexts returns per-tick host vitals: /proc/uptime, /proc/loadavg,
+	// /proc/stat, and hwmon temp files in `grep -H` path:value form. All
+	// best-effort — parsers tolerate empty strings.
+	HostTexts(ctx context.Context) (uptime, loadavg, stat, hwmon string)
+	// InfoTexts returns once-per-connect host identity: `zfs version`
+	// output, the kernel release, and /etc/os-release. Best-effort.
+	InfoTexts(ctx context.Context) (zfsVer, kernel, osRelease string)
 	Name() string
 }
 
@@ -112,6 +119,33 @@ func (Exec) RootTexts(ctx context.Context) (string, error) {
 func (Exec) PoolProps(ctx context.Context) (string, error) {
 	out, err := exec.CommandContext(ctx, "zpool", "get", "-Hp", "ashift").Output()
 	return string(out), err
+}
+
+func (Exec) HostTexts(ctx context.Context) (string, string, string, string) {
+	readFile := func(p string) string {
+		b, _ := os.ReadFile(p)
+		return string(b)
+	}
+	// hwmon files render as path:value lines — the same shape `grep -H .`
+	// produces over ssh, so one parser serves both collectors
+	var hw strings.Builder
+	for _, pat := range []string{"/sys/class/hwmon/hwmon*/name", "/sys/class/hwmon/hwmon*/temp*_input"} {
+		paths, _ := filepath.Glob(pat)
+		for _, p := range paths {
+			if b, err := os.ReadFile(p); err == nil {
+				hw.WriteString(p + ":" + strings.TrimSpace(string(b)) + "\n")
+			}
+		}
+	}
+	return readFile("/proc/uptime"), readFile("/proc/loadavg"),
+		readFile("/proc/stat"), hw.String()
+}
+
+func (Exec) InfoTexts(ctx context.Context) (string, string, string) {
+	ver, _ := exec.CommandContext(ctx, "zfs", "version").Output()
+	kernel, _ := os.ReadFile("/proc/sys/kernel/osrelease")
+	osrel, _ := os.ReadFile("/etc/os-release")
+	return string(ver), strings.TrimSpace(string(kernel)), string(osrel)
 }
 
 func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {
@@ -222,6 +256,22 @@ func (r Replay) RootTexts(context.Context) (string, error) {
 
 func (r Replay) PoolProps(context.Context) (string, error) {
 	return r.read("zpool-ashift.out") // absent in pre-v2 fixture dirs
+}
+
+func (r Replay) HostTexts(context.Context) (string, string, string, string) {
+	// all absent in pre-multi-host fixture dirs; vitals simply don't render
+	up, _ := r.read("uptime.out")
+	load, _ := r.read("loadavg.out")
+	stat, _ := r.read("proc-stat.out")
+	hwmon, _ := r.read("hwmon.out")
+	return up, load, stat, hwmon
+}
+
+func (r Replay) InfoTexts(context.Context) (string, string, string) {
+	ver, _ := r.read("zfs-version.out")
+	kernel, _ := r.read("kernel.out")
+	osrel, _ := r.read("os-release.out")
+	return ver, strings.TrimSpace(kernel), osrel
 }
 
 func (Replay) DestroyDryRun(context.Context, string) (string, error) {

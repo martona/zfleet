@@ -6,23 +6,28 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/martona/zfs-explorer/internal/collect"
 	"github.com/martona/zfs-explorer/internal/zfs"
 )
 
 // The performance screen: a full-width dashboard for one pool's engine —
 // ARC, txg pipeline, write throttle, per-vdev latency, ZIL — with a
 // clearly-labeled heuristic reading. Reached with `p` from anywhere;
-// `p`/Esc/Backspace returns to wherever you were. Its 2s fetch is armed
-// only while the screen is open.
+// `p`/Esc/Backspace returns to wherever you were. With remotes registered
+// the bar grows a host line above the pool line: ↑/↓ move focus between
+// the lines, ←/→ walk the focused one, and tab always means "next pool",
+// wrapping across host boundaries. Its 2s fetch is armed only while the
+// screen is open.
 
 const modePerf = 2
 
 const perfInterval = 2 * time.Second
 
 type perfState struct {
+	host *hostState
 	pool string
 	from int // mode to return to
+
+	focusHosts bool // ↑/↓ focus: true = the host line owns ←/→
 
 	txgs      []zfs.TxgRow
 	dmu       map[string]int64
@@ -43,6 +48,7 @@ type perfState struct {
 const perfLatHistLen = 30
 
 type perfMsg struct {
+	host   string
 	pool   string
 	txgs   string
 	dmuTx  string
@@ -53,46 +59,79 @@ type perfMsg struct {
 }
 type perfTickMsg struct{}
 
-func fetchPerf(src collect.Source, pool string) tea.Cmd {
+func fetchPerf(h *hostState, pool string) tea.Cmd {
+	if h == nil {
+		return nil
+	}
+	host, src := h.name, h.src
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		txgs, dmuTx, zil, params, iostat, err := src.PerfTexts(ctx, pool)
-		return perfMsg{pool: pool, txgs: txgs, dmuTx: dmuTx, zil: zil,
+		return perfMsg{host: host, pool: pool, txgs: txgs, dmuTx: dmuTx, zil: zil,
 			params: params, iostat: iostat, err: err}
 	}
+}
+
+// perfTarget resets the dashboard onto (host, pool), remembering the pool
+// as that host's last-viewed.
+func (m *Model) perfTarget(h *hostState, pool string, from int, focusHosts bool) tea.Cmd {
+	m.perf = perfState{host: h, pool: pool, from: from, focusHosts: focusHosts}
+	m.perfMem[h.name] = pool
+	m.mode = modePerf
+	return fetchPerf(h, pool)
+}
+
+// perfPoolFor picks the pool to land on for a host: the remembered one,
+// else its first.
+func (m *Model) perfPoolFor(h *hostState) string {
+	if p := m.perfMem[h.name]; p != "" && h.pool(p) != nil {
+		return p
+	}
+	if len(h.pools) > 0 {
+		return h.pools[0].Name
+	}
+	return ""
 }
 
 // enterPerf opens the dashboard for the pool implied by the current
 // context.
 func (m *Model) enterPerf() tea.Cmd {
+	var h *hostState
 	pool := ""
 	switch m.mode {
 	case modeBrowser:
-		pool = m.br.pool
+		h, pool = m.br.host, m.br.pool
+		if pool == "" && h != nil { // browser host level
+			pool = m.perfPoolFor(h)
+		}
 	default:
 		switch row := m.treeSelected(); row.kind {
+		case rHost:
+			h, pool = row.host, m.perfPoolFor(row.host)
 		case rPool:
-			pool = row.pool.Name
+			h, pool = row.host, row.pool.Name
 		case rDataset:
-			pool = poolOf(row.ds.Name)
+			h, pool = row.host, poolOf(row.ds.Name)
 		default:
-			// overview: pick the busiest pool by current physical io
+			// overview: pick the busiest pool by current physical io,
+			// fleet-wide
 			var best int64 = -1
-			for _, p := range m.pools {
-				io := m.io[p.Name]
-				if v := io.RBw + io.WBw; v > best {
-					best, pool = v, p.Name
+			for _, hh := range m.hosts {
+				for _, p := range hh.pools {
+					io := hh.io[p.Name]
+					if v := io.RBw + io.WBw; v > best {
+						best, h, pool = v, hh, p.Name
+					}
 				}
 			}
 		}
 	}
-	if pool == "" {
+	if h == nil || pool == "" {
 		return nil
 	}
-	m.perf = perfState{pool: pool, from: m.mode}
-	m.mode = modePerf
-	return tea.Batch(fetchPerf(m.src, pool),
+	from := m.mode
+	return tea.Batch(m.perfTarget(h, pool, from, false),
 		tea.Tick(perfInterval, func(time.Time) tea.Msg { return perfTickMsg{} }))
 }
 
@@ -100,22 +139,60 @@ func (m *Model) exitPerf() {
 	m.mode = m.perf.from
 }
 
-// perfCycle moves to the next/previous pool, keeping deltas fresh by
-// resetting per-pool sample state.
+type perfPair struct {
+	h    *hostState
+	pool string
+}
+
+// perfPairs flattens the fleet into (host, pool) stops in display order.
+func (m *Model) perfPairs() []perfPair {
+	var out []perfPair
+	for _, h := range m.hosts {
+		for _, p := range h.pools {
+			out = append(out, perfPair{h, p.Name})
+		}
+	}
+	return out
+}
+
+// perfCycle moves to the next/previous pool, wrapping across host
+// boundaries — today's muscle memory, fleet-sized.
 func (m *Model) perfCycle(delta int) tea.Cmd {
-	if len(m.pools) == 0 {
+	pairs := m.perfPairs()
+	if len(pairs) == 0 {
 		return nil
 	}
 	idx := 0
-	for i, p := range m.pools {
-		if p.Name == m.perf.pool {
+	for i, pr := range pairs {
+		if pr.h == m.perf.host && pr.pool == m.perf.pool {
 			idx = i
 		}
 	}
-	idx = (idx + delta + len(m.pools)) % len(m.pools)
-	from := m.perf.from
-	m.perf = perfState{pool: m.pools[idx].Name, from: from}
-	return fetchPerf(m.src, m.perf.pool)
+	idx = (idx + delta + len(pairs)) % len(pairs)
+	return m.perfTarget(pairs[idx].h, pairs[idx].pool, m.perf.from, m.perf.focusHosts)
+}
+
+// perfCycleHost moves to the next/previous host, landing on its remembered
+// pool. Hosts without pools are skipped — there is nothing to dashboard.
+func (m *Model) perfCycleHost(delta int) tea.Cmd {
+	var withPools []*hostState
+	for _, h := range m.hosts {
+		if len(h.pools) > 0 {
+			withPools = append(withPools, h)
+		}
+	}
+	if len(withPools) == 0 {
+		return nil
+	}
+	idx := 0
+	for i, h := range withPools {
+		if h == m.perf.host {
+			idx = i
+		}
+	}
+	idx = (idx + delta + len(withPools)) % len(withPools)
+	h := withPools[idx]
+	return m.perfTarget(h, m.perfPoolFor(h), m.perf.from, m.perf.focusHosts)
 }
 
 func (m *Model) perfKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -124,18 +201,34 @@ func (m *Model) perfKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "p", "esc", "backspace":
 		m.exitPerf()
-	case "tab", "right", "l":
+	case "tab":
 		return m, m.perfCycle(1)
-	case "shift+tab", "left", "h":
+	case "shift+tab":
 		return m, m.perfCycle(-1)
-	case "t":
-		m.expandAll = !m.expandAll // force leaf disks in the latency table
+	case "right", "l":
+		if m.perf.focusHosts {
+			return m, m.perfCycleHost(1)
+		}
+		return m, m.perfCycle(1)
+	case "left", "h":
+		if m.perf.focusHosts {
+			return m, m.perfCycleHost(-1)
+		}
+		return m, m.perfCycle(-1)
+	case "up", "down":
+		if m.multiHost {
+			m.perf.focusHosts = !m.perf.focusHosts
+		}
+	case "j":
+		m.panelScroll++
+	case "k":
+		m.panelScroll--
 	}
 	return m, nil
 }
 
 func (m *Model) applyPerf(msg perfMsg) {
-	if msg.pool != m.perf.pool {
+	if m.perf.host == nil || msg.host != m.perf.host.name || msg.pool != m.perf.pool {
 		return
 	}
 	if msg.err != nil {
@@ -150,7 +243,7 @@ func (m *Model) applyPerf(msg perfMsg) {
 	if p := zfs.ParseParams(msg.params); len(p) > 0 {
 		m.perf.params = p
 	}
-	m.perf.lat = zfs.ParseIostatLatency(msg.iostat, m.perf.pool, m.poolNames())
+	m.perf.lat = zfs.ParseIostatLatency(msg.iostat, m.perf.pool, m.perf.host.poolNames())
 	if m.perf.latHist == nil {
 		m.perf.latHist = map[string][]zfs.VdevLat{}
 	}
@@ -185,38 +278,22 @@ func (m *Model) latWindow(name string) (avg zfs.VdevLat, peakW int64, samples in
 	return avg, peakW, len(ring)
 }
 
-// EnterPerfFor opens the perf screen on a named pool (dump helper).
-func (m *Model) EnterPerfFor(pool string) bool {
-	for _, p := range m.pools {
-		if p.Name == pool {
-			m.perf = perfState{pool: pool, from: m.mode}
-			m.mode = modePerf
-			return true
-		}
+// EnterPerfFor opens the perf screen on a named pool of a host (dump helper).
+func (m *Model) EnterPerfFor(host, pool string) bool {
+	h := m.hostByName(host)
+	if h == nil || h.pool(pool) == nil {
+		return false
 	}
-	return false
+	m.perf = perfState{host: h, pool: pool, from: m.mode}
+	m.perfMem[h.name] = pool
+	m.mode = modePerf
+	return true
 }
 
 // ApplyPerf ingests raw perf texts outside the tea loop (dump helper).
-func (m *Model) ApplyPerf(pool, txgs, dmuTx, zil, params, iostat string, err error) {
-	m.applyPerf(perfMsg{pool: pool, txgs: txgs, dmuTx: dmuTx, zil: zil,
+func (m *Model) ApplyPerf(host, pool, txgs, dmuTx, zil, params, iostat string, err error) {
+	m.applyPerf(perfMsg{host: host, pool: pool, txgs: txgs, dmuTx: dmuTx, zil: zil,
 		params: params, iostat: iostat, err: err})
-}
-
-// arcRate computes a per-second delta for an arcstats counter.
-func (m *Model) arcRate(key string) float64 {
-	if m.arcMapPrev == nil {
-		return 0
-	}
-	dt := m.arcAt.Sub(m.arcPrevAt).Seconds()
-	if dt <= 0 {
-		return 0
-	}
-	d := m.arcMap[key] - m.arcMapPrev[key]
-	if d < 0 {
-		return 0
-	}
-	return float64(d) / dt
 }
 
 // perfRate computes a per-second delta for a counter across the last two

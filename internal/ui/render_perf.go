@@ -4,26 +4,16 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/martona/zfs-explorer/internal/zfs"
 )
 
-// perfPoolBar renders the pool tabs — current one inverted, scrolled so it
-// stays visible when the fleet outgrows the line.
-func perfPoolBar(m *Model, w int) string {
-	var cells []string
-	curIdx := 0
-	for i, p := range m.pools {
-		label := " " + p.Name + " "
-		if p.Name == m.perf.pool {
-			curIdx = i
-			cells = append(cells, styInv.Render(label))
-		} else {
-			cells = append(cells, styDim.Render(label))
-		}
-	}
+// tabCells windows a row of tab labels so the current one stays visible
+// when the fleet outgrows the line.
+func tabCells(cells []string, curIdx, w int) string {
 	width := func(a, b int) int {
 		total := 0
 		for _, c := range cells[a:b] {
@@ -46,23 +36,87 @@ func perfPoolBar(m *Model, w int) string {
 	if end < len(cells) {
 		bar += styDim.Render(" ›")
 	}
-	return " " + bar
+	return bar
 }
 
-func perfPane(m *Model, w, h int) []string {
+// perfPoolBar renders the pool tabs of the dashboard's host — current one
+// inverted.
+func perfPoolBar(m *Model, w int) string {
+	var cells []string
+	curIdx := 0
+	for i, p := range m.perf.host.pools {
+		label := " " + p.Name + " "
+		if p.Name == m.perf.pool {
+			curIdx = i
+			cells = append(cells, styInv.Render(label))
+		} else {
+			cells = append(cells, styDim.Render(label))
+		}
+	}
+	return " " + tabCells(cells, curIdx, w)
+}
+
+// perfHostBar renders the host line above the pool line; a `▸` marks which
+// of the two ←/→ currently walks. Unreachable hosts show dark.
+func perfHostBar(m *Model, w int) (hostLine, poolLine string) {
+	var cells []string
+	curIdx := 0
+	for i, h := range m.hosts {
+		label := " " + h.name + " "
+		switch {
+		case h == m.perf.host:
+			curIdx = i
+			cells = append(cells, styInv.Render(label))
+		case h.conn == connDown:
+			cells = append(cells, styDim.Render(" "+h.name+"× "))
+		default:
+			cells = append(cells, styDim.Render(label))
+		}
+	}
+	hostMark, poolMark := "  ", "  "
+	if m.perf.focusHosts {
+		hostMark = "▸ "
+	} else {
+		poolMark = "▸ "
+	}
+	hostLine = " " + hostMark + styDim.Render("host ") + tabCells(cells, curIdx, w-8)
+	poolLine = " " + poolMark + styDim.Render("pool ") + perfPoolBar(m, w-8)
+	return hostLine, poolLine
+}
+
+func perfPane(m *Model, w int) []string {
+	h := m.perf.host
 	var lines []string
 	add := func(s string) { lines = append(lines, s) }
-	add(perfPoolBar(m, w))
+	if m.multiHost {
+		hostLine, poolLine := perfHostBar(m, w)
+		add(hostLine)
+		add(poolLine)
+	} else {
+		add(perfPoolBar(m, w))
+	}
 	add("")
+	if h.conn == connDown {
+		add(" " + styWarn.Render(h.name+" "+hostOutage(h)))
+		if !h.lastOK.IsZero() {
+			add(" " + styDim.Render("last data "+niceAge(time.Since(h.lastOK))+" ago"))
+		}
+		if h.errText != "" {
+			for _, ln := range wrap(h.errText, w-3) {
+				add(" " + styDim.Render(ln))
+			}
+		}
+		return lines
+	}
 	if !m.perf.have {
 		add(" " + styDim.Render("collecting…"))
 		return lines
 	}
 
 	// ── diagnostics gathered first so the reading can weigh all of it ──
-	arc := m.arcMap
+	arc := h.arcMap
 	var perfPool *zfs.Pool
-	for _, p := range m.pools {
+	for _, p := range h.pools {
 		if p.Name == m.perf.pool {
 			perfPool = p
 		}
@@ -71,14 +125,14 @@ func perfPane(m *Model, w, h int) []string {
 	scanActive := perfPool != nil && perfPool.Scan.State == zfs.ScanInProgress
 
 	rollPct := -1.0
-	if dh, dm := m.arc.Hits-m.arcPrev.Hits, m.arc.Misses-m.arcPrev.Misses; dh+dm > 0 {
+	if dh, dm := h.arc.Hits-h.arcPrev.Hits, h.arc.Misses-h.arcPrev.Misses; dh+dm > 0 {
 		rollPct = 100 * float64(dh) / float64(dh+dm)
-	} else if m.arc.Hits+m.arc.Misses > 0 {
-		rollPct = 100 * float64(m.arc.Hits) / float64(m.arc.Hits+m.arc.Misses)
+	} else if h.arc.Hits+h.arc.Misses > 0 {
+		rollPct = 100 * float64(h.arc.Hits) / float64(h.arc.Hits+h.arc.Misses)
 	}
-	ghostRate := m.arcRate("mru_ghost_hits") + m.arcRate("mfu_ghost_hits")
-	missRate := m.arcRate("misses")
-	memThrottle := m.arcRate("memory_throttle_count")
+	ghostRate := h.arcRate("mru_ghost_hits") + h.arcRate("mfu_ghost_hits")
+	missRate := h.arcRate("misses")
+	memThrottle := h.arcRate("memory_throttle_count")
 	noGrow := arc["arc_no_grow"] > 0
 	commitRate := m.perfRate(m.perf.zil, m.perf.zilPrev, "zil_commit_count")
 	slogLatW := int64(-1)
@@ -101,8 +155,8 @@ func perfPane(m *Model, w, h int) []string {
 	if rollPct >= 0 {
 		rollHit = fmt.Sprintf("%.1f%%", rollPct)
 	}
-	add(" " + styBold.Render("arc") + "   " + zfs.NiceBytes(m.arc.Size) + " / " +
-		zfs.NiceBytes(m.arc.CMax) + " · hit " + rollHit + " " + sparkline(m.hitHist, 8) +
+	add(" " + styBold.Render("arc") + "   " + zfs.NiceBytes(h.arc.Size) + " / " +
+		zfs.NiceBytes(h.arc.CMax) + " · hit " + rollHit + " " + sparkline(h.hitHist, 8) +
 		"   mru " + zfs.NiceBytes(arc["mru_size"]) + " · mfu " + zfs.NiceBytes(arc["mfu_size"]))
 	l2 := ""
 	if arc["l2_size"] > 0 {
@@ -111,7 +165,7 @@ func perfPane(m *Model, w, h int) []string {
 	add("       " + styDim.Render("demand-data "+hitPct(arc["demand_data_hits"], arc["demand_data_misses"])+
 		" · demand-meta "+hitPct(arc["demand_metadata_hits"], arc["demand_metadata_misses"])+
 		" · prefetch "+hitPct(arc["prefetch_data_hits"], arc["prefetch_data_misses"])+l2))
-	ghostLine := fmt.Sprintf("ghost hits mru %.1f/s · mfu %.1f/s", m.arcRate("mru_ghost_hits"), m.arcRate("mfu_ghost_hits"))
+	ghostLine := fmt.Sprintf("ghost hits mru %.1f/s · mfu %.1f/s", h.arcRate("mru_ghost_hits"), h.arcRate("mfu_ghost_hits"))
 	if memThrottle > 0 {
 		ghostLine += styWarn.Render(fmt.Sprintf(" · memory throttled %.1f/s", memThrottle))
 	}
@@ -147,7 +201,7 @@ func perfPane(m *Model, w, h int) []string {
 		styDim.Render(fmt.Sprintf(" (%s since boot)", zfs.NiceCount(m.perf.dmu["dmu_tx_dirty_delay"]))))
 
 	// the reading: a labeled heuristic, not a verdict from on high
-	io := m.io[m.perf.pool]
+	io := h.io[m.perf.pool]
 	var reading string
 	busyDirty := dirtyMax > 0 && sum.DirtyPeak > dirtyMax*delayPct/100
 	arcStarved := rollPct >= 0 && rollPct < 90 && missRate > 5 && ghostRate > missRate/4
@@ -184,16 +238,8 @@ func perfPane(m *Model, w, h int) []string {
 	// Leaf disks expand when the terminal has room (or `t` forces it), with
 	// the boilerplate prefix siblings share stripped so rows show the part
 	// of the serial that differs.
-	vdevCount, leafCount := 0, 0
-	if perfPool != nil {
-		for _, c := range perfPool.Classes {
-			for _, v := range c.Vdevs {
-				vdevCount++
-				leafCount += len(v.Leaves())
-			}
-		}
-	}
-	expandLeaves := m.expandAll || h-(len(lines)+12+vdevCount) >= leafCount
+	// always fully expanded — j/k scrolling replaced the fit-or-force logic
+	expandLeaves := true
 	type latEnt struct {
 		indent string
 		full   string // complete name — used whenever it fits
@@ -309,7 +355,7 @@ func perfPane(m *Model, w, h int) []string {
 		r, w int64
 	}
 	var talkers []talker
-	for name, io := range m.dsIO {
+	for name, io := range h.dsIO {
 		if poolOf(name) != m.perf.pool || io.RBw+io.WBw == 0 {
 			continue
 		}
@@ -323,16 +369,10 @@ func perfPane(m *Model, w, h int) []string {
 	if m.perf.err != "" {
 		notes += 2
 	}
-	if strings.HasPrefix(m.src.Name(), "replay") {
+	if strings.HasPrefix(h.src.Name(), "replay") {
 		notes += 2
 	}
-	avail := h - len(lines) - notes
-	if avail < 1 {
-		avail = 1
-	}
-	if avail > 15 {
-		avail = 15
-	}
+	avail := 8
 	if len(talkers) == 0 {
 		add("   " + styDim.Render("no dataset io this interval"))
 	}
@@ -347,9 +387,9 @@ func perfPane(m *Model, w, h int) []string {
 		add("")
 		add(" " + styWarn.Render("collector: "+truncate(m.perf.err, w-14)))
 	}
-	if strings.HasPrefix(m.src.Name(), "replay") {
+	if strings.HasPrefix(h.src.Name(), "replay") {
 		add("")
 		add(" " + styDim.Render("[replay] rates read as zero — counters are frozen"))
 	}
-	return clampLines(lines, h)
+	return lines
 }

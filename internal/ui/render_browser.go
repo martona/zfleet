@@ -10,11 +10,17 @@ import (
 )
 
 func (m *Model) breadcrumb() string {
-	c := m.brContainer()
-	if c == nil {
-		return m.br.pool
+	var crumb string
+	switch c := m.brContainer(); {
+	case m.brAtHostLevel():
+		crumb = m.br.host.name
+	case c == nil:
+		crumb = m.brQualify(m.br.pool)
+	default:
+		segs := strings.Split(c.Name, "/")
+		segs[0] = m.brQualify(segs[0])
+		crumb = strings.Join(segs, " ▸ ")
 	}
-	crumb := strings.Join(strings.Split(c.Name, "/"), " ▸ ")
 	if m.br.filterIn || m.br.filter != "" {
 		crumb += "  /" + m.br.filter
 		if m.br.filterIn {
@@ -27,7 +33,19 @@ func (m *Model) breadcrumb() string {
 	return crumb
 }
 
+// brQualify prefixes a pool name with its host, scp-style, once there is
+// more than one host to tell apart.
+func (m *Model) brQualify(pool string) string {
+	if m.multiHost && m.br.host != nil {
+		return m.br.host.name + ":" + pool
+	}
+	return pool
+}
+
 func brLeftPane(m *Model, w, h int) []string {
+	if m.brAtHostLevel() {
+		return brHostLevelPane(m, w, h)
+	}
 	c := m.brContainer()
 	if c == nil {
 		return []string{" " + styDim.Render("collecting datasets…")}
@@ -133,7 +151,56 @@ func brLeftPane(m *Model, w, h int) []string {
 	return clampLines(lines, h)
 }
 
-func brRightTitle(sel brEntry) string {
+// brHostLevelPane renders the pools-of-a-host level: the host as its own
+// leftmost self row, pools as children with share-of-allocated bars.
+func brHostLevelPane(m *Model, w, h int) []string {
+	host := m.br.host
+	entries := m.brEntries()
+	cur := m.brCursorIdx(entries)
+
+	var total int64
+	for _, p := range host.pools {
+		if p.Alloc > 0 {
+			total += p.Alloc
+		}
+	}
+	nameW := w - 2 - 2 - 1 - 5 - 1 - 6 - 1
+	if nameW < 10 {
+		nameW = 10
+	}
+	var lines []string
+	for i, e := range entries {
+		onCur := i == cur
+		var row string
+		switch e.kind {
+		case eHostSelf:
+			body := padR(truncate(host.name, nameW+6), nameW+6) + " " + padL(zfs.NiceBytes(total), 7)
+			if onCur {
+				row = styInv.Render(padR("▸ "+body, w))
+			} else {
+				row = "  " + styBold.Render(body)
+			}
+		case ePool:
+			share := int64(-1)
+			if total > 0 && e.pool.Alloc >= 0 {
+				share = e.pool.Alloc * 100 / total
+			}
+			name := e.pool.Name + "/"
+			left := "    " + padR(truncate(name, nameW), nameW) + " "
+			right := " " + padL(zfs.NiceBytes(e.pool.Alloc), 6)
+			if onCur {
+				left = styInv.Render("▸   " + padR(truncate(name, nameW), nameW) + " ")
+				row = left + bar(share, 5) + styInv.Render(padR(right, w-nameW-11))
+			} else {
+				row = left + bar(share, 5) + right
+			}
+		}
+		lines = append(lines, row)
+	}
+	return clampLines(lines, h)
+}
+
+func brRightTitle(m *Model, sel brEntry) string {
 	switch sel.kind {
 	case eSelf, eChild:
 		return sel.ds.Base()
@@ -141,21 +208,29 @@ func brRightTitle(sel brEntry) string {
 		return "@" + sel.fam.Label()
 	case eSnap:
 		return "@" + sel.snap.Snap
+	case eHostSelf:
+		return m.br.host.name
+	case ePool:
+		return sel.pool.Name
 	}
 	return ""
 }
 
-func brInspector(m *Model, sel brEntry, w, h int) []string {
+func brInspector(m *Model, sel brEntry, w int) []string {
 	if len(m.br.selSnaps) > 0 {
-		return clampLines(selInspector(m, w), h)
+		return selInspector(m, w)
 	}
 	switch sel.kind {
 	case eSelf, eChild:
-		return clampLines(dsInspector(m, sel.ds, w), h)
+		return dsInspector(m, m.br.host, sel.ds, w)
 	case eFam:
-		return clampLines(famInspector(m, sel.fam, w), h)
+		return famInspector(m, sel.fam, w)
 	case eSnap:
-		return clampLines(snapInspector(m, sel.snap), h)
+		return snapInspector(m, sel.snap)
+	case eHostSelf:
+		return hostInspector(m, m.br.host, w)
+	case ePool:
+		return inspector(m, m.br.host, sel.pool, w)
 	}
 	return nil
 }
@@ -167,7 +242,7 @@ func (m *Model) reclaimLines(target string, snaps []*zfs.Snapshot, w int) []stri
 	for _, s := range snaps {
 		sum += s.Used
 	}
-	r := m.dryCache[target]
+	r := m.br.host.dryCache[target]
 	switch {
 	case r != nil && r.errText != "":
 		return []string{
@@ -218,7 +293,7 @@ func selInspector(m *Model, w int) []string {
 	return lines
 }
 
-func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
+func dsInspector(m *Model, h *hostState, d *zfs.Dataset, w int) []string {
 	var lines []string
 
 	// type · encryption (the mount story gets its own line below)
@@ -261,7 +336,7 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 		default:
 			mp = " " + styDim.Render("not mounted "+truncate(d.Mountpoint, w-22))
 		}
-		if p, ok := m.dsProps[d.Name]; ok {
+		if p, ok := h.dsProps[d.Name]; ok {
 			switch src := p["mountpoint"].Source; {
 			case src == "received":
 				mp += styWarn.Render(" ·recv")
@@ -284,7 +359,7 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 	// blocks pad to (parity+1)-sector multiples, so compressing a 16K block
 	// to 10K often allocates exactly the same 8 sectors.
 	if d.LogicalUsed > 0 && d.Used > 0 {
-		vw, par, ash, geo := m.poolGeometry(poolOf(d.Name))
+		vw, par, ash, geo := h.poolGeometry(poolOf(d.Name))
 		volGeo := geo && d.IsVolume() && d.Volblocksize > 0
 
 		vsLogical := (float64(d.Used)/float64(d.LogicalUsed) - 1) * 100
@@ -353,7 +428,7 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 	// snapshots summary from lazy fetch. "pinning" splits usedbysnapshots
 	// into per-snapshot-unique vs collectively-held space — when shared
 	// dwarfs unique, only a range destroy gets the space back.
-	if snaps, ok := m.dsSnaps[d.Name]; ok {
+	if snaps, ok := h.dsSnaps[d.Name]; ok {
 		if len(snaps) == 0 {
 			lines = append(lines, " "+styDim.Render("no snapshots"))
 		} else {
@@ -378,7 +453,7 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 	lines = append(lines, "")
 
 	// key properties, with source tags once `zfs get` lands
-	props := m.dsProps[d.Name]
+	props := h.dsProps[d.Name]
 	tag := func(name string) string {
 		p, ok := props[name]
 		if !ok {
@@ -423,12 +498,12 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 	// covering this dataset and everything beneath it. Entries exist only
 	// for loaded datasets (mounted fs, active zvols).
 	lines = append(lines, "")
-	sub, rh, wh, loaded := m.subtreeIO(d)
+	sub, rh, wh, loaded := h.subtreeIO(d)
 	switch {
 	case loaded > 0:
 		lines = append(lines, " io   r "+padL(zfs.NiceBytes(sub.RBw)+"/s", 8)+" "+sparkline(rh, 10)+
 			"   w "+padL(zfs.NiceBytes(sub.WBw)+"/s", 8)+" "+sparkline(wh, 10))
-	case m.objsetPrev != nil:
+	case h.objsetPrev != nil:
 		reason := "dataset not loaded"
 		if len(d.Children) > 0 {
 			reason = "nothing loaded in subtree"
@@ -436,42 +511,6 @@ func dsInspector(m *Model, d *zfs.Dataset, w int) []string {
 		lines = append(lines, " io   "+styDim.Render("no stats ("+reason+")"))
 	}
 	return lines
-}
-
-// subtreeIO sums current rates and tail-aligned history over d and all its
-// descendants that have loaded objsets.
-func (m *Model) subtreeIO(d *zfs.Dataset) (cur zfs.IORates, rh, wh []int64, loaded int) {
-	var rings [][]zfs.IORates
-	maxLen := 0
-	var walk func(x *zfs.Dataset)
-	walk = func(x *zfs.Dataset) {
-		if r, ok := m.dsIO[x.Name]; ok {
-			cur.RBw += r.RBw
-			cur.WBw += r.WBw
-			cur.ROps += r.ROps
-			cur.WOps += r.WOps
-			loaded++
-			ring := m.dsIOHist[x.Name]
-			rings = append(rings, ring)
-			if len(ring) > maxLen {
-				maxLen = len(ring)
-			}
-		}
-		for _, c := range x.Children {
-			walk(c)
-		}
-	}
-	walk(d)
-	rh = make([]int64, maxLen)
-	wh = make([]int64, maxLen)
-	for _, ring := range rings {
-		off := maxLen - len(ring)
-		for i, s := range ring {
-			rh[off+i] += s.RBw
-			wh[off+i] += s.WBw
-		}
-	}
-	return cur, rh, wh, loaded
 }
 
 func snapInspector(m *Model, s *zfs.Snapshot) []string {

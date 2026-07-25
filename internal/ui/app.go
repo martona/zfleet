@@ -16,114 +16,109 @@ const (
 	statsInterval = 2 * time.Second
 )
 
+// HostSpec names one host for the Model: a display name, the ssh
+// destination ("" for the local host), and its collector.
+type HostSpec struct {
+	Name string
+	Dest string
+	Src  collect.Source
+}
+
 type Model struct {
-	src collect.Source
+	hosts     []*hostState
+	multiHost bool // any remote registered: host rows appear everywhere
 
 	w, h int
 	mode int
 	br   browserState
 
 	// tree screen state
-	treeSel      string          // row id: "≡", "p:<pool>", or dataset name
+	treeSel      string          // row id: "≡", "h:<host>", "p:<host>\x00<pool>", or "<host>\x00<dataset>"
 	expanded     map[string]bool // same id scheme
 	treeSortUsed bool
 
-	// shared per-dataset caches, used by both the tree screen and the
-	// drill browser
-	dsTrees     map[string]*zfs.DatasetTree
-	dsTreesPend map[string]bool
-	dsSnaps     map[string][]*zfs.Snapshot // empty non-nil = "none"
-	dsSnapsPend map[string]bool
-	dsProps     map[string]map[string]zfs.Prop
-	dsPropsPend map[string]bool
-	dryCache    map[string]*dryResult // dry-run destroy results by target
+	perf    perfState
+	perfMem map[string]string // per-host remembered perf pool
 
-	pools      []*zfs.Pool
-	rootStats  map[string]zfs.RootStat
-	ashift     map[string]int
-	arc        zfs.ArcStats
-	arcPrev    zfs.ArcStats
-	haveArc    bool
-	arcMap     map[string]int64 // full arcstats for the perf screen
-	arcMapPrev map[string]int64
-	arcAt      time.Time
-	arcPrevAt  time.Time
-	hitHist    []int64 // rolling hit%×10 ring
-	io         map[string]zfs.IORates
-	ioHist     map[string][]zfs.IORates // pool-level ring for sparklines
-	ioText     string
+	selName string // current inspector pool ("host\x00pool"), for elastic resets
+	fleetW  map[string]int
 
-	perf perfState
-
-	// per-dataset io from objset kstat deltas
-	dsIO       map[string]zfs.IORates
-	dsIOHist   map[string][]zfs.IORates // ring of recent samples, newest last
-	objsetPrev map[string]zfs.ObjsetIO
-	objsetAt   time.Time
-
-	selName   string
-	expandAll bool
-	lastErr   error
-
-	// grow-only readout widths; ioW is per-pool (reset on selection change),
-	// stripW lives for the session
-	ioW    map[string]int
-	stripW map[string]int
+	// right-panel scrolling: j/k adjust the offset; the key identifies the
+	// panel's content so any context change resets to the top
+	panelScroll   int
+	panelKey      string
+	rightOverflow bool
 }
 
-func New(src collect.Source) *Model {
-	return &Model{
-		src:          src,
-		br:           newBrowserState(""),
+func New(specs []HostSpec, multiHost bool) *Model {
+	m := &Model{
+		multiHost:    multiHost,
+		br:           newBrowserState(nil, ""),
 		treeSortUsed: true,
 		expanded:     map[string]bool{},
-		dsTrees:      map[string]*zfs.DatasetTree{},
-		dsTreesPend:  map[string]bool{},
-		dsSnaps:      map[string][]*zfs.Snapshot{},
-		dsSnapsPend:  map[string]bool{},
-		dsProps:      map[string]map[string]zfs.Prop{},
-		dsPropsPend:  map[string]bool{},
-		dryCache:     map[string]*dryResult{},
-		rootStats:    map[string]zfs.RootStat{},
-		ashift:       map[string]int{},
-		io:           map[string]zfs.IORates{},
-		ioHist:       map[string][]zfs.IORates{},
-		dsIO:         map[string]zfs.IORates{},
-		dsIOHist:     map[string][]zfs.IORates{},
-		ioW:          map[string]int{},
-		stripW:       map[string]int{},
+		perfMem:      map[string]string{},
+		fleetW:       map[string]int{},
 	}
+	for _, s := range specs {
+		m.hosts = append(m.hosts, newHostState(s.Name, s.Dest, s.Src))
+	}
+	return m
 }
 
-func (m *Model) setSel(name string) {
-	if name != m.selName {
-		m.selName = name
-		m.ioW = map[string]int{}
+func (m *Model) hostByName(name string) *hostState {
+	for _, h := range m.hosts {
+		if h.name == name {
+			return h
+		}
+	}
+	return nil
+}
+
+// setSel notes the pool whose inspector is showing, resetting its elastic
+// readout widths on change.
+func (m *Model) setSel(h *hostState, pool string) {
+	key := h.name + "\x00" + pool
+	if key != m.selName {
+		m.selName = key
+		h.ioW = map[string]int{}
 	}
 }
 
 type poolsDataMsg struct {
+	host      string
 	pools     []*zfs.Pool
 	rootsText string
 	propsText string
 	err       error
 }
 type statsDataMsg struct {
+	host       string
 	arcText    string
 	ioText     string
 	objsetText string
+	uptime     string
+	loadavg    string
+	procStat   string
+	hwmon      string
 	err        error
+}
+type infoMsg struct {
+	host   string
+	zfsVer string
+	kernel string
+	osRel  string
 }
 type poolsTickMsg struct{}
 type statsTickMsg struct{}
 
-func fetchPools(src collect.Source) tea.Cmd {
+func fetchPools(h *hostState) tea.Cmd {
+	host, src := h.name, h.src
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		status, list, err := src.PoolTexts(ctx)
 		if err != nil {
-			return poolsDataMsg{err: err}
+			return poolsDataMsg{host: host, err: err}
 		}
 		pools := zfs.ParseZpoolStatus(status)
 		zfs.AttachListNumbers(pools, list)
@@ -131,180 +126,173 @@ func fetchPools(src collect.Source) tea.Cmd {
 		// when either is unavailable
 		roots, _ := src.RootTexts(ctx)
 		props, _ := src.PoolProps(ctx)
-		return poolsDataMsg{pools: pools, rootsText: roots, propsText: props}
+		return poolsDataMsg{host: host, pools: pools, rootsText: roots, propsText: props}
 	}
 }
 
-func fetchStats(src collect.Source) tea.Cmd {
+func fetchStats(h *hostState) tea.Cmd {
+	host, src := h.name, h.src
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		arc, iostat, objsets, err := src.StatTexts(ctx)
-		return statsDataMsg{arcText: arc, ioText: iostat, objsetText: objsets, err: err}
+		msg := statsDataMsg{host: host, arcText: arc, ioText: iostat, objsetText: objsets, err: err}
+		if err == nil {
+			msg.uptime, msg.loadavg, msg.procStat, msg.hwmon = src.HostTexts(ctx)
+		}
+		return msg
+	}
+}
+
+func fetchInfo(h *hostState) tea.Cmd {
+	host, src := h.name, h.src
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		ver, kernel, osrel := src.InfoTexts(ctx)
+		return infoMsg{host: host, zfsVer: ver, kernel: kernel, osRel: osrel}
 	}
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(fetchPools(m.src), fetchStats(m.src),
-		tea.Tick(datasetsInterval, func(time.Time) tea.Msg { return datasetsTickMsg{} }))
-}
-
-func (m *Model) poolNames() map[string]bool {
-	names := map[string]bool{}
-	for _, p := range m.pools {
-		names[p.Name] = true
+	cmds := []tea.Cmd{
+		tea.Tick(poolsInterval, func(time.Time) tea.Msg { return poolsTickMsg{} }),
+		tea.Tick(statsInterval, func(time.Time) tea.Msg { return statsTickMsg{} }),
+		tea.Tick(datasetsInterval, func(time.Time) tea.Msg { return datasetsTickMsg{} }),
 	}
-	return names
-}
-
-func (m *Model) selIdx() int {
-	for i, p := range m.pools {
-		if p.Name == m.selName {
-			return i
-		}
+	for _, h := range m.hosts {
+		h.poolsPend, h.statsPend, h.infoPend = true, true, true
+		cmds = append(cmds, fetchPools(h), fetchStats(h), fetchInfo(h))
 	}
-	return 0
+	return tea.Batch(cmds...)
 }
 
-// ApplyPoolData ingests parsed pools outside the tea loop (used by --dump).
-func (m *Model) ApplyPoolData(pools []*zfs.Pool) {
-	m.pools = pools
+// ApplyPoolData ingests parsed pools for a host (also used by --dump).
+func (m *Model) ApplyPoolData(host string, pools []*zfs.Pool) {
+	h := m.hostByName(host)
+	if h == nil {
+		return
+	}
+	h.pools = pools
 	if m.treeSel == "" && len(pools) > 0 {
 		// land on the overview — the fleet answer — as the original
 		// round-1 concept intended
 		m.treeSel = overviewID
 	}
-	if m.ioText != "" {
-		m.io = zfs.ParseIostatPools(m.ioText, m.poolNames())
+	if h.ioText != "" {
+		h.io = zfs.ParseIostatPools(h.ioText, h.poolNames())
 	}
 }
 
 // ApplyAuxPools ingests the per-pool root totals and ashift values that
 // feed the allocation-overhead line.
-func (m *Model) ApplyAuxPools(rootsText, propsText string) {
+func (m *Model) ApplyAuxPools(host, rootsText, propsText string) {
+	h := m.hostByName(host)
+	if h == nil {
+		return
+	}
 	if rootsText != "" {
-		m.rootStats = zfs.ParseRootStats(rootsText)
+		h.rootStats = zfs.ParseRootStats(rootsText)
 	}
 	if propsText != "" {
-		m.ashift = zfs.ParsePoolAshift(propsText)
+		h.ashift = zfs.ParsePoolAshift(propsText)
 	}
 }
 
-// poolGeometry returns the data-vdev raidz shape of a pool, when it has one.
-func (m *Model) poolGeometry(pool string) (width, parity, ashift int, ok bool) {
-	ashift, haveShift := m.ashift[pool]
-	if !haveShift {
-		return 0, 0, 0, false
+// ApplyStatData ingests raw stat text for a host (also used by --dump).
+func (m *Model) ApplyStatData(host, arcText, ioText, objsetText string) {
+	h := m.hostByName(host)
+	if h == nil {
+		return
 	}
-	for _, p := range m.pools {
-		if p.Name != pool {
-			continue
-		}
-		data := p.Class("data")
-		if data == nil || len(data.Vdevs) == 0 {
-			return 0, 0, 0, false
-		}
-		v := data.Vdevs[0]
-		par, isRaidz := zfs.RaidzShape(v.Name)
-		if !isRaidz || len(v.Children) <= par {
-			return 0, 0, 0, false
-		}
-		return len(v.Children), par, ashift, true
-	}
-	return 0, 0, 0, false
-}
-
-// ApplyStatData ingests raw stat text outside the tea loop (used by --dump).
-func (m *Model) ApplyStatData(arcText, ioText, objsetText string) {
 	if strings.TrimSpace(arcText) != "" {
-		m.arcPrev = m.arc
-		m.arc = zfs.ParseArcstats(arcText)
-		m.arcMapPrev, m.arcMap = m.arcMap, zfs.ParseKstatMap(arcText)
-		m.arcPrevAt, m.arcAt = m.arcAt, time.Now()
-		m.haveArc = true
-		if dh, dm := m.arc.Hits-m.arcPrev.Hits, m.arc.Misses-m.arcPrev.Misses; dh+dm > 0 {
-			m.hitHist = append(m.hitHist, 1000*dh/(dh+dm))
-			if len(m.hitHist) > dsIOHistLen {
-				m.hitHist = m.hitHist[len(m.hitHist)-dsIOHistLen:]
+		h.arcPrev = h.arc
+		h.arc = zfs.ParseArcstats(arcText)
+		h.arcMapPrev, h.arcMap = h.arcMap, zfs.ParseKstatMap(arcText)
+		h.arcPrevAt, h.arcAt = h.arcAt, time.Now()
+		h.haveArc = true
+		if dh, dm := h.arc.Hits-h.arcPrev.Hits, h.arc.Misses-h.arcPrev.Misses; dh+dm > 0 {
+			h.hitHist = append(h.hitHist, 1000*dh/(dh+dm))
+			if len(h.hitHist) > dsIOHistLen {
+				h.hitHist = h.hitHist[len(h.hitHist)-dsIOHistLen:]
 			}
 		}
 	}
-	m.ioText = ioText
-	if len(m.pools) > 0 {
-		m.io = zfs.ParseIostatPools(ioText, m.poolNames())
-		for name, r := range m.io {
-			hist := append(m.ioHist[name], r)
+	h.ioText = ioText
+	if len(h.pools) > 0 {
+		h.io = zfs.ParseIostatPools(ioText, h.poolNames())
+		var agg zfs.IORates
+		for name, r := range h.io {
+			hist := append(h.ioHist[name], r)
 			if len(hist) > dsIOHistLen {
 				hist = hist[len(hist)-dsIOHistLen:]
 			}
-			m.ioHist[name] = hist
+			h.ioHist[name] = hist
+			agg.RBw += r.RBw
+			agg.WBw += r.WBw
+		}
+		h.hostIOHist = append(h.hostIOHist, agg)
+		if len(h.hostIOHist) > dsIOHistLen {
+			h.hostIOHist = h.hostIOHist[len(h.hostIOHist)-dsIOHistLen:]
 		}
 	}
 	if objsetText != "" {
-		m.applyObjsets(zfs.ParseObjsets(objsetText))
+		h.applyObjsets(zfs.ParseObjsets(objsetText))
+	}
+}
+
+// ApplyHostVitals ingests the HostTexts surfaces (also used by --dump).
+func (m *Model) ApplyHostVitals(host, uptime, loadavg, stat, hwmon string) {
+	if h := m.hostByName(host); h != nil {
+		h.applyVitals(uptime, loadavg, stat, hwmon)
+	}
+}
+
+// ApplyHostInfo ingests the identity surfaces (also used by --dump).
+func (m *Model) ApplyHostInfo(host, zfsVer, kernel, osRel string) {
+	if h := m.hostByName(host); h != nil {
+		h.applyInfo(zfsVer, kernel, osRel)
+	}
+}
+
+// MarkHostLive forces the connection state to live (dump helper — dumps
+// have no tick loop to establish it).
+func (m *Model) MarkHostLive(host string) {
+	if h := m.hostByName(host); h != nil {
+		h.noteStatsOK()
 	}
 }
 
 // 32 samples at the 2s stat tick ≈ a one-minute sparkline window
 const dsIOHistLen = 32
 
-// applyObjsets turns cumulative objset counters into rates against the
-// previous sample and appends them to each dataset's history ring.
-// Counters reset when a dataset reloads, so negative deltas clamp to zero.
-func (m *Model) applyObjsets(cur map[string]zfs.ObjsetIO) {
-	now := time.Now()
-	dt := now.Sub(m.objsetAt).Seconds()
-	if m.objsetPrev != nil && dt > 0.2 {
-		rates := map[string]zfs.IORates{}
-		for name, c := range cur {
-			p, ok := m.objsetPrev[name]
-			if !ok {
-				continue
-			}
-			clamp := func(d int64) int64 {
-				if d < 0 {
-					return 0
-				}
-				return int64(float64(d) / dt)
-			}
-			r := zfs.IORates{
-				ROps: clamp(c.Reads - p.Reads),
-				WOps: clamp(c.Writes - p.Writes),
-				RBw:  clamp(c.NRead - p.NRead),
-				WBw:  clamp(c.NWritten - p.NWritten),
-			}
-			rates[name] = r
-			hist := append(m.dsIOHist[name], r)
-			if len(hist) > dsIOHistLen {
-				hist = hist[len(hist)-dsIOHistLen:]
-			}
-			m.dsIOHist[name] = hist
-		}
-		m.dsIO = rates
-	}
-	m.objsetPrev = cur
-	m.objsetAt = now
-}
-
 // SetSize sets the frame size directly (used by --dump).
 func (m *Model) SetSize(w, h int) { m.w, m.h = w, h }
 
-// SetSelected moves the tree cursor to "overview" or a named pool (used by
-// --dump --select).
-func (m *Model) SetSelected(name string) {
+// SetSelected moves the tree cursor to "overview", a host name, a pool, or
+// a dataset path on the given host (used by --dump --select).
+func (m *Model) SetSelected(host, name string) {
 	if name == "overview" {
 		m.treeSel = overviewID
 		return
 	}
-	for _, p := range m.pools {
+	h := m.hostByName(host)
+	if h == nil {
+		return
+	}
+	if name == "" || name == h.name {
+		m.treeSel = treeHostID(h)
+		return
+	}
+	for _, p := range h.pools {
 		if p.Name == name {
-			m.treeSel = treePoolID(name)
-			m.setSel(name)
+			m.treeSel = treePoolID(h, name)
+			m.setSel(h, name)
 			return
 		}
 	}
-	if tree := m.dsTrees[poolOf(name)]; tree != nil && tree.ByName[name] != nil {
-		m.treeSel = name
+	if tree := h.dsTrees[poolOf(name)]; tree != nil && tree.ByName[name] != nil {
+		m.treeSel = treeDsID(h, name)
 	}
 }
 
@@ -316,35 +304,80 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case poolsDataMsg:
-		if msg.err != nil {
-			m.lastErr = msg.err
-		} else {
-			m.lastErr = nil
-			m.ApplyPoolData(msg.pools)
-			m.ApplyAuxPools(msg.rootsText, msg.propsText)
+		h := m.hostByName(msg.host)
+		if h == nil {
+			return m, nil
 		}
-		return m, tea.Tick(poolsInterval, func(time.Time) tea.Msg { return poolsTickMsg{} })
+		h.poolsPend = false
+		if msg.err != nil {
+			h.lastErr = msg.err
+		} else {
+			h.lastErr = nil
+			m.ApplyPoolData(msg.host, msg.pools)
+			m.ApplyAuxPools(msg.host, msg.rootsText, msg.propsText)
+		}
+		return m, nil
 
 	case statsDataMsg:
-		if msg.err != nil {
-			m.lastErr = msg.err
-		} else {
-			m.ApplyStatData(msg.arcText, msg.ioText, msg.objsetText)
+		h := m.hostByName(msg.host)
+		if h == nil {
+			return m, nil
 		}
-		return m, tea.Tick(statsInterval, func(time.Time) tea.Msg { return statsTickMsg{} })
+		h.statsPend = false
+		if msg.err != nil {
+			h.noteStatsFail(msg.err)
+			return m, nil
+		}
+		h.noteStatsOK()
+		m.ApplyStatData(msg.host, msg.arcText, msg.ioText, msg.objsetText)
+		h.applyVitals(msg.uptime, msg.loadavg, msg.procStat, msg.hwmon)
+		return m, nil
+
+	case infoMsg:
+		h := m.hostByName(msg.host)
+		if h == nil {
+			return m, nil
+		}
+		h.infoPend = false
+		h.applyInfo(msg.zfsVer, msg.kernel, msg.osRel)
+		return m, nil
 
 	case poolsTickMsg:
-		return m, fetchPools(m.src)
+		cmds := []tea.Cmd{tea.Tick(poolsInterval, func(time.Time) tea.Msg { return poolsTickMsg{} })}
+		for _, h := range m.hosts {
+			if h.poolsPend || (h.conn == connDown && time.Now().Before(h.nextTry)) {
+				continue
+			}
+			h.poolsPend = true
+			cmds = append(cmds, fetchPools(h))
+		}
+		return m, tea.Batch(cmds...)
 
 	case statsTickMsg:
-		return m, fetchStats(m.src)
+		cmds := []tea.Cmd{tea.Tick(statsInterval, func(time.Time) tea.Msg { return statsTickMsg{} })}
+		for _, h := range m.hosts {
+			if h.statsPend || (h.conn == connDown && time.Now().Before(h.nextTry)) {
+				continue
+			}
+			h.statsPend = true
+			cmds = append(cmds, fetchStats(h))
+			if h.conn == connLive && !h.haveInfo && !h.infoPend {
+				h.infoPend = true
+				cmds = append(cmds, fetchInfo(h))
+			}
+		}
+		return m, tea.Batch(cmds...)
 
 	case datasetsMsg:
-		delete(m.dsTreesPend, msg.pool)
+		h := m.hostByName(msg.host)
+		if h == nil {
+			return m, nil
+		}
+		delete(h.dsTreesPend, msg.pool)
 		if msg.err != nil {
-			m.lastErr = msg.err
+			h.lastErr = msg.err
 		} else {
-			m.dsTrees[msg.pool] = zfs.ParseDatasets(msg.text)
+			h.dsTrees[msg.pool] = zfs.ParseDatasets(msg.text)
 		}
 		if m.mode == modeBrowser {
 			return m, m.brEnsure()
@@ -352,40 +385,48 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.treeEnsure()
 
 	case snapsMsg:
-		delete(m.dsSnapsPend, msg.ds)
-		if msg.err == nil {
-			m.ApplySnaps(msg.ds, msg.text)
+		if h := m.hostByName(msg.host); h != nil {
+			delete(h.dsSnapsPend, msg.ds)
+			if msg.err == nil {
+				m.ApplySnaps(msg.host, msg.ds, msg.text)
+			}
 		}
 		return m, nil
 
 	case propsMsg:
-		delete(m.dsPropsPend, msg.ds)
-		if msg.err == nil {
-			m.ApplyProps(msg.ds, msg.text)
+		if h := m.hostByName(msg.host); h != nil {
+			delete(h.dsPropsPend, msg.ds)
+			if msg.err == nil {
+				m.ApplyProps(msg.host, msg.ds, msg.text)
+			}
 		}
 		return m, nil
 
 	case datasetsTickMsg:
 		cmds := []tea.Cmd{tea.Tick(datasetsInterval, func(time.Time) tea.Msg { return datasetsTickMsg{} })}
-		need := map[string]bool{}
-		if m.mode == modeBrowser && m.br.pool != "" {
-			need[m.br.pool] = true
+		type needKey struct {
+			h    *hostState
+			pool string
+		}
+		need := map[needKey]bool{}
+		if m.mode == modeBrowser && m.br.host != nil && m.br.pool != "" {
+			need[needKey{m.br.host, m.br.pool}] = true
 		}
 		for id := range m.expanded {
-			if strings.HasPrefix(id, "p:") {
-				need[strings.TrimPrefix(id, "p:")] = true
+			if h, pool, ok := splitPoolID(m, id); ok {
+				need[needKey{h, pool}] = true
 			}
 		}
-		for pool := range need {
-			if !m.dsTreesPend[pool] {
-				m.dsTreesPend[pool] = true
-				cmds = append(cmds, fetchDatasets(m.src, pool))
+		for k := range need {
+			if !k.h.dsTreesPend[k.pool] {
+				k.h.dsTreesPend[k.pool] = true
+				cmds = append(cmds, fetchDatasets(k.h, k.pool))
 			}
 		}
-		if m.mode == modeBrowser {
-			if c := m.brContainer(); c != nil && !m.dsSnapsPend[c.Name] {
-				m.dsSnapsPend[c.Name] = true
-				cmds = append(cmds, fetchSnaps(m.src, c.Name))
+		if m.mode == modeBrowser && m.br.host != nil {
+			if c := m.brContainer(); c != nil && !m.br.host.dsSnapsPend[c.Name] {
+				m.br.host.dsSnapsPend[c.Name] = true
+				cmds = append(cmds, fetchSnaps(m.br.host, c.Name))
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -397,11 +438,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dryRunMsg:
-		if r := m.dryCache[msg.target]; r != nil {
-			r.pending = false
-			r.text = msg.text
-			if msg.err != nil {
-				r.errText = msg.err.Error()
+		if h := m.hostByName(msg.host); h != nil {
+			if r := h.dryCache[msg.target]; r != nil {
+				r.pending = false
+				r.text = msg.text
+				if msg.err != nil {
+					r.errText = msg.err.Error()
+				}
 			}
 		}
 		return m, nil
@@ -414,7 +457,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode != modePerf {
 			return m, nil
 		}
-		return m, tea.Batch(fetchPerf(m.src, m.perf.pool),
+		return m, tea.Batch(fetchPerf(m.perf.host, m.perf.pool),
 			tea.Tick(perfInterval, func(time.Time) tea.Msg { return perfTickMsg{} }))
 
 	case tea.KeyMsg:
@@ -448,12 +491,16 @@ func (m *Model) MarkSnaps(names []string) {
 }
 
 // ApplyDryRun stores a dry-run result for a target (dump helper).
-func (m *Model) ApplyDryRun(target, text string, err error) {
+func (m *Model) ApplyDryRun(host, target, text string, err error) {
+	h := m.hostByName(host)
+	if h == nil {
+		return
+	}
 	r := &dryResult{text: text}
 	if err != nil {
 		r.errText = err.Error()
 	}
-	m.dryCache[target] = r
+	h.dryCache[target] = r
 }
 
 func (m *Model) View() string {

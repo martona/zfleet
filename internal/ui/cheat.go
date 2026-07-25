@@ -14,9 +14,26 @@ import (
 type keyHint struct{ key, label string } // key == "" renders label-only
 
 func (m *Model) cheatHints() []keyHint {
+	hints := m.cheatBase()
+	// the scroll hint earns its slot only when there is something to scroll
+	if m.rightOverflow {
+		label := "scrl right"
+		if m.mode == modePerf {
+			label = "scroll"
+		}
+		hints = append(hints, keyHint{"j/k", label})
+	}
+	return hints
+}
+
+func (m *Model) cheatBase() []keyHint {
 	switch m.mode {
 	case modePerf:
-		return []keyHint{{"tab/←→", "pool"}, {"t", "disks"}, {"esc", "back"}, {"q", "quit"}}
+		hints := []keyHint{{"tab/←→", "pool"}}
+		if m.multiHost {
+			hints = append(hints, keyHint{"↑↓", "hosts"})
+		}
+		return append(hints, keyHint{"esc", "back"}, keyHint{"q", "quit"})
 
 	case modeBrowser:
 		if m.br.filterIn {
@@ -27,9 +44,9 @@ func (m *Model) cheatHints() []keyHint {
 		}
 		var head []keyHint
 		switch sel := m.brSelected(); sel.kind {
-		case eSelf:
+		case eSelf, eHostSelf:
 			head = []keyHint{{"enter", "up"}}
-		case eChild:
+		case eChild, ePool:
 			head = []keyHint{{"enter", "open"}}
 		case eFam:
 			label := "unfold"
@@ -49,13 +66,15 @@ func (m *Model) cheatHints() []keyHint {
 		switch row.kind {
 		case rOverview:
 			head = []keyHint{{"↓", "browse"}}
+		case rHost:
+			head = []keyHint{{"enter", "browse"}}
 		case rPool:
 			if row.expanded {
 				head = append(head, keyHint{"←", "collapse"})
 			} else {
 				head = append(head, keyHint{"→", "expand"})
 			}
-			head = append(head, keyHint{"enter", "drill"}, keyHint{"t", "disks"})
+			head = append(head, keyHint{"enter", "drill"})
 		case rDataset:
 			switch {
 			case row.expanded:

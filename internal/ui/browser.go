@@ -8,7 +8,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/martona/zfs-explorer/internal/collect"
 	"github.com/martona/zfs-explorer/internal/zfs"
 )
 
@@ -16,8 +15,9 @@ import (
 // container itself — the named, inspectable ".." (Enter on it goes up).
 // Child datasets indent beneath it; the container's own snapshots close the
 // list back at container indent, because they belong to it, not to the
-// children. Dataset trees, snapshots, and properties live in shared Model
-// caches, used by the tree screen too.
+// children. With remotes registered there is one more level above the pool
+// root: the host, whose children are its pools. Dataset trees, snapshots,
+// and properties live in per-host caches shared with the tree screen.
 
 const (
 	modePools = iota // the tree/overview screen
@@ -43,12 +43,14 @@ type dryResult struct {
 }
 
 type browserState struct {
-	pool     string
-	stack    []brLevel
-	expFams  map[string]bool // container + "\x00" + family label
-	sortUsed bool
-	filter   string
-	filterIn bool
+	host       *hostState
+	pool       string          // "" while on the host level
+	stack      []brLevel       // empty = host level (multi-host only)
+	hostCursor string          // cursor memory for the host level
+	expFams    map[string]bool // container + "\x00" + family label
+	sortUsed   bool
+	filter     string
+	filterIn   bool
 
 	// snapshot multi-select, scoped to the current level; cleared on any
 	// level change so there is never an undo fight
@@ -56,12 +58,14 @@ type browserState struct {
 	selGen   int             // bumped per change; debounces the dry-run
 }
 
-func newBrowserState(pool string) browserState {
+func newBrowserState(h *hostState, pool string) browserState {
 	return browserState{
-		pool:     pool,
-		expFams:  map[string]bool{},
-		selSnaps: map[string]bool{},
-		sortUsed: true,
+		host:       h,
+		pool:       pool,
+		hostCursor: "·",
+		expFams:    map[string]bool{},
+		selSnaps:   map[string]bool{},
+		sortUsed:   true,
 	}
 }
 
@@ -79,6 +83,8 @@ const (
 	eChild
 	eFam
 	eSnap
+	eHostSelf // host level: the host itself
+	ePool     // host level: one of its pools
 )
 
 type brEntry struct {
@@ -86,19 +92,50 @@ type brEntry struct {
 	ds     *zfs.Dataset
 	fam    *zfs.SnapFamily
 	snap   *zfs.Snapshot
+	pool   *zfs.Pool
 	id     string
 	member bool // snapshot shown scattered from an expanded family
 }
 
+// brAtHostLevel reports whether the browser is on the pools-of-a-host level.
+func (m *Model) brAtHostLevel() bool {
+	return m.mode == modeBrowser && len(m.br.stack) == 0 && m.br.host != nil
+}
+
 func (m *Model) brContainer() *zfs.Dataset {
-	tree := m.dsTrees[m.br.pool]
-	if tree == nil || len(m.br.stack) == 0 {
+	if m.br.host == nil || len(m.br.stack) == 0 {
+		return nil
+	}
+	tree := m.br.host.dsTrees[m.br.pool]
+	if tree == nil {
 		return nil
 	}
 	return tree.ByName[m.br.stack[len(m.br.stack)-1].name]
 }
 
 func (m *Model) brEntries() []brEntry {
+	filter := strings.ToLower(m.br.filter)
+	match := func(s string) bool {
+		return filter == "" || strings.Contains(strings.ToLower(s), filter)
+	}
+
+	if m.brAtHostLevel() {
+		h := m.br.host
+		out := []brEntry{{kind: eHostSelf, id: "·"}}
+		pools := append([]*zfs.Pool(nil), h.pools...)
+		if m.br.sortUsed {
+			sort.SliceStable(pools, func(i, j int) bool { return pools[i].Alloc > pools[j].Alloc })
+		} else {
+			sort.SliceStable(pools, func(i, j int) bool { return pools[i].Name < pools[j].Name })
+		}
+		for _, p := range pools {
+			if match(p.Name) {
+				out = append(out, brEntry{kind: ePool, pool: p, id: p.Name})
+			}
+		}
+		return out
+	}
+
 	c := m.brContainer()
 	if c == nil {
 		return nil
@@ -110,10 +147,6 @@ func (m *Model) brEntries() []brEntry {
 		sort.SliceStable(kids, func(i, j int) bool { return kids[i].Used > kids[j].Used })
 	} else {
 		sort.SliceStable(kids, func(i, j int) bool { return kids[i].Name < kids[j].Name })
-	}
-	filter := strings.ToLower(m.br.filter)
-	match := func(s string) bool {
-		return filter == "" || strings.Contains(strings.ToLower(s), filter)
 	}
 	for _, k := range kids {
 		if match(k.Base()) {
@@ -129,7 +162,7 @@ func (m *Model) brEntries() []brEntry {
 		e brEntry
 	}
 	var cands []cand
-	for _, e := range zfs.GroupSnapshots(m.dsSnaps[c.Name], familyMinSize) {
+	for _, e := range zfs.GroupSnapshots(m.br.host.dsSnaps[c.Name], familyMinSize) {
 		if e.Fam != nil {
 			if !match(e.Fam.Label()) {
 				continue
@@ -167,8 +200,15 @@ func (m *Model) famTarget(f *zfs.SnapFamily) string {
 	return c.Name + "@" + strings.Join(names, ",")
 }
 
+func (m *Model) brCursorID() string {
+	if len(m.br.stack) == 0 {
+		return m.br.hostCursor
+	}
+	return m.br.stack[len(m.br.stack)-1].cursor
+}
+
 func (m *Model) brCursorIdx(entries []brEntry) int {
-	want := m.br.stack[len(m.br.stack)-1].cursor
+	want := m.brCursorID()
 	for i, e := range entries {
 		if e.id == want {
 			return i
@@ -186,6 +226,10 @@ func (m *Model) brSelected() brEntry {
 }
 
 func (m *Model) brSetCursorID(id string) {
+	if len(m.br.stack) == 0 {
+		m.br.hostCursor = id
+		return
+	}
 	m.br.stack[len(m.br.stack)-1].cursor = id
 }
 
@@ -213,9 +257,15 @@ func (m *Model) brClearSelection() {
 
 func (m *Model) brUp() {
 	m.brClearSelection()
-	if len(m.br.stack) > 1 {
+	switch {
+	case len(m.br.stack) > 1:
 		m.br.stack = m.br.stack[:len(m.br.stack)-1]
-	} else {
+	case len(m.br.stack) == 1 && m.multiHost:
+		// pool root → the host level, cursor on the pool we came from
+		m.br.hostCursor = m.br.pool
+		m.br.stack = nil
+		m.br.pool = ""
+	default:
 		m.mode = modePools
 	}
 	m.br.filter, m.br.filterIn = "", false
@@ -225,6 +275,15 @@ func (m *Model) brDescend(ds *zfs.Dataset) {
 	m.brClearSelection()
 	m.br.stack = append(m.br.stack, brLevel{name: ds.Name, cursor: "·"})
 	m.br.filter, m.br.filterIn = "", false
+}
+
+// brDescendPool enters a pool's root level from the host level.
+func (m *Model) brDescendPool(pool string) tea.Cmd {
+	m.brClearSelection()
+	m.br.pool = pool
+	m.br.stack = []brLevel{{name: pool, cursor: "·"}}
+	m.br.filter, m.br.filterIn = "", false
+	return tea.Batch(m.ensureTreeCmd(m.br.host, pool), m.brEnsure())
 }
 
 // brToggleSel toggles selection on the current row: a snapshot toggles
@@ -267,7 +326,7 @@ func (m *Model) brSelection() []*zfs.Snapshot {
 		return nil
 	}
 	var out []*zfs.Snapshot
-	for _, s := range m.dsSnaps[c.Name] {
+	for _, s := range m.br.host.dsSnaps[c.Name] {
 		if m.br.selSnaps[s.Snap] {
 			out = append(out, s)
 		}
@@ -288,14 +347,26 @@ func (m *Model) SelectionTarget() string {
 	return m.brContainer().Name + "@" + strings.Join(names, ",")
 }
 
-// enterBrowserAt opens the drill browser at a dataset path (a bare pool
-// name opens the root level). Returning to the same pool's root restores
-// the previous position.
-func (m *Model) enterBrowserAt(path string) tea.Cmd {
+// enterBrowserAt opens the drill browser on a host: at a dataset path, at a
+// pool's root level (bare pool name), or at the host level (empty path).
+// Returning to the same spot restores the previous position.
+func (m *Model) enterBrowserAt(h *hostState, path string) tea.Cmd {
+	if path == "" {
+		if m.br.host != h {
+			m.br = newBrowserState(h, "")
+		} else {
+			m.brClearSelection()
+			m.br.stack = nil
+			m.br.pool = ""
+			m.br.filter, m.br.filterIn = "", false
+		}
+		m.mode = modeBrowser
+		return m.brEnsure()
+	}
 	pool := poolOf(path)
-	samePool := m.br.pool == pool
+	samePool := m.br.host == h && m.br.pool == pool
 	if !samePool {
-		m.br = newBrowserState(pool)
+		m.br = newBrowserState(h, pool)
 	}
 	if !(samePool && path == pool && len(m.br.stack) > 0) {
 		segs := strings.Split(path, "/")
@@ -305,58 +376,66 @@ func (m *Model) enterBrowserAt(path string) tea.Cmd {
 		}
 	}
 	m.mode = modeBrowser
-	return tea.Batch(m.ensureTreeCmd(pool), m.brEnsure())
+	return tea.Batch(m.ensureTreeCmd(h, pool), m.brEnsure())
 }
 
 // lazy-fetch helpers shared by the browser and the tree screen
 
-func (m *Model) ensureTreeCmd(pool string) tea.Cmd {
-	if m.dsTrees[pool] != nil || m.dsTreesPend[pool] {
+func (m *Model) ensureTreeCmd(h *hostState, pool string) tea.Cmd {
+	if h == nil || h.dsTrees[pool] != nil || h.dsTreesPend[pool] {
 		return nil
 	}
-	m.dsTreesPend[pool] = true
-	return fetchDatasets(m.src, pool)
+	h.dsTreesPend[pool] = true
+	return fetchDatasets(h, pool)
 }
 
-func (m *Model) ensureSnapsCmd(name string) tea.Cmd {
-	if _, ok := m.dsSnaps[name]; ok || m.dsSnapsPend[name] {
+func (m *Model) ensureSnapsCmd(h *hostState, name string) tea.Cmd {
+	if h == nil {
 		return nil
 	}
-	m.dsSnapsPend[name] = true
-	return fetchSnaps(m.src, name)
+	if _, ok := h.dsSnaps[name]; ok || h.dsSnapsPend[name] {
+		return nil
+	}
+	h.dsSnapsPend[name] = true
+	return fetchSnaps(h, name)
 }
 
-func (m *Model) ensurePropsCmd(name string) tea.Cmd {
-	if _, ok := m.dsProps[name]; ok || m.dsPropsPend[name] {
+func (m *Model) ensurePropsCmd(h *hostState, name string) tea.Cmd {
+	if h == nil {
 		return nil
 	}
-	m.dsPropsPend[name] = true
-	return fetchProps(m.src, name)
+	if _, ok := h.dsProps[name]; ok || h.dsPropsPend[name] {
+		return nil
+	}
+	h.dsPropsPend[name] = true
+	return fetchProps(h, name)
 }
 
 // ensureDryCmd runs a dry-run destroy for a target once, caching forever —
 // the target string embeds the exact snapshot set, so changes mint new keys.
 func (m *Model) ensureDryCmd(target string) tea.Cmd {
-	if target == "" {
+	h := m.br.host
+	if target == "" || h == nil {
 		return nil
 	}
-	if _, ok := m.dryCache[target]; ok {
+	if _, ok := h.dryCache[target]; ok {
 		return nil
 	}
-	m.dryCache[target] = &dryResult{pending: true}
-	return fetchDryRun(m.src, target)
+	h.dryCache[target] = &dryResult{pending: true}
+	return fetchDryRun(h, target)
 }
 
 // brEnsure requests any lazy data the current view is missing.
 func (m *Model) brEnsure() tea.Cmd {
+	h := m.br.host
 	c := m.brContainer()
 	if c == nil {
 		return nil
 	}
-	cmds := []tea.Cmd{m.ensureSnapsCmd(c.Name)}
+	cmds := []tea.Cmd{m.ensureSnapsCmd(h, c.Name)}
 	switch sel := m.brSelected(); {
 	case sel.ds != nil:
-		cmds = append(cmds, m.ensureSnapsCmd(sel.ds.Name), m.ensurePropsCmd(sel.ds.Name))
+		cmds = append(cmds, m.ensureSnapsCmd(h, sel.ds.Name), m.ensurePropsCmd(h, sel.ds.Name))
 	case sel.kind == eFam:
 		// don't tell the user a dry-run is needed — just run it
 		cmds = append(cmds, m.ensureDryCmd(m.famTarget(sel.fam)))
@@ -386,10 +465,14 @@ func (m *Model) browserKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	case "down", "j":
+	case "down":
 		m.brMove(1)
-	case "up", "k":
+	case "up":
 		m.brMove(-1)
+	case "j":
+		m.panelScroll++
+	case "k":
+		m.panelScroll--
 	case "g":
 		if e := m.brEntries(); len(e) > 0 {
 			m.brSetCursorID(e[0].id)
@@ -400,6 +483,10 @@ func (m *Model) browserKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		switch sel := m.brSelected(); sel.kind {
+		case eHostSelf: // the host's own ".." — back out to the tree
+			m.mode = modePools
+		case ePool:
+			return m, m.brDescendPool(sel.pool.Name)
 		case eSelf: // the named ".." — Enter walks up
 			m.brUp()
 		case eChild:
@@ -409,6 +496,10 @@ func (m *Model) browserKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.br.expFams[key] = !m.br.expFams[key]
 		}
 	case "backspace", "left", "h":
+		if m.brAtHostLevel() {
+			m.mode = modePools
+			break
+		}
 		m.brUp()
 	case "esc":
 		switch {
@@ -416,6 +507,8 @@ func (m *Model) browserKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.brClearSelection()
 		case m.br.filter != "":
 			m.br.filter = ""
+		case m.brAtHostLevel():
+			m.mode = modePools
 		default:
 			m.brUp()
 		}
@@ -452,16 +545,19 @@ func (m *Model) brDryRunDebounce() tea.Cmd {
 // messages and fetch commands
 
 type datasetsMsg struct {
+	host string
 	pool string
 	text string
 	err  error
 }
 type snapsMsg struct {
+	host string
 	ds   string
 	text string
 	err  error
 }
 type propsMsg struct {
+	host string
 	ds   string
 	text string
 	err  error
@@ -469,77 +565,100 @@ type propsMsg struct {
 type datasetsTickMsg struct{}
 type dryTickMsg struct{ gen int }
 type dryRunMsg struct {
+	host   string
 	target string
 	text   string
 	err    error
 }
 
-func fetchDryRun(src collect.Source, target string) tea.Cmd {
+func fetchDryRun(h *hostState, target string) tea.Cmd {
+	host, src := h.name, h.src
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		text, err := src.DestroyDryRun(ctx, target)
-		return dryRunMsg{target: target, text: text, err: err}
+		return dryRunMsg{host: host, target: target, text: text, err: err}
 	}
 }
 
-func fetchDatasets(src collect.Source, pool string) tea.Cmd {
+func fetchDatasets(h *hostState, pool string) tea.Cmd {
+	host, src := h.name, h.src
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		text, err := src.DatasetTexts(ctx, pool)
-		return datasetsMsg{pool: pool, text: text, err: err}
+		return datasetsMsg{host: host, pool: pool, text: text, err: err}
 	}
 }
 
-func fetchSnaps(src collect.Source, ds string) tea.Cmd {
+func fetchSnaps(h *hostState, ds string) tea.Cmd {
+	host, src := h.name, h.src
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		text, err := src.SnapshotTexts(ctx, ds)
-		return snapsMsg{ds: ds, text: text, err: err}
+		return snapsMsg{host: host, ds: ds, text: text, err: err}
 	}
 }
 
-func fetchProps(src collect.Source, ds string) tea.Cmd {
+func fetchProps(h *hostState, ds string) tea.Cmd {
+	host, src := h.name, h.src
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		text, err := src.PropTexts(ctx, ds)
-		return propsMsg{ds: ds, text: text, err: err}
+		return propsMsg{host: host, ds: ds, text: text, err: err}
 	}
 }
 
 // exported helpers for --dump
 
-func (m *Model) ApplyDatasets(pool, text string) {
-	m.dsTrees[pool] = zfs.ParseDatasets(text)
-	delete(m.dsTreesPend, pool)
+func (m *Model) ApplyDatasets(host, pool, text string) {
+	if h := m.hostByName(host); h != nil {
+		h.dsTrees[pool] = zfs.ParseDatasets(text)
+		delete(h.dsTreesPend, pool)
+	}
 }
 
-func (m *Model) ApplySnaps(ds, text string) {
+func (m *Model) ApplySnaps(host, ds, text string) {
+	h := m.hostByName(host)
+	if h == nil {
+		return
+	}
 	snaps := zfs.ParseSnapshots(text, ds)
 	if snaps == nil {
 		snaps = []*zfs.Snapshot{}
 	}
-	m.dsSnaps[ds] = snaps
-	delete(m.dsSnapsPend, ds)
+	h.dsSnaps[ds] = snaps
+	delete(h.dsSnapsPend, ds)
 }
 
-func (m *Model) ApplyProps(ds, text string) {
-	m.dsProps[ds] = zfs.ParseProps(text, ds)
-	delete(m.dsPropsPend, ds)
+func (m *Model) ApplyProps(host, ds, text string) {
+	if h := m.hostByName(host); h != nil {
+		h.dsProps[ds] = zfs.ParseProps(text, ds)
+		delete(h.dsPropsPend, ds)
+	}
 }
 
-// BrowseTo opens the browser at the given dataset's level (dump helper).
-func (m *Model) BrowseTo(path string) bool {
+// BrowseTo opens the browser at the given dataset's level on a host; an
+// empty path opens the host level (dump helper).
+func (m *Model) BrowseTo(host, path string) bool {
+	h := m.hostByName(host)
+	if h == nil {
+		return false
+	}
+	if path == "" {
+		m.br = newBrowserState(h, "")
+		m.mode = modeBrowser
+		return true
+	}
 	pool := poolOf(path)
-	tree := m.dsTrees[pool]
+	tree := h.dsTrees[pool]
 	if tree == nil || tree.ByName[path] == nil {
 		return false
 	}
-	if m.br.pool != pool {
-		m.br = newBrowserState(pool)
+	if m.br.host != h || m.br.pool != pool {
+		m.br = newBrowserState(h, pool)
 	}
 	segs := strings.Split(path, "/")
 	m.br.stack = nil
@@ -575,7 +694,8 @@ func (m *Model) SetCursorRow(name string) bool {
 		hit := e.id == name ||
 			(e.ds != nil && e.ds.Base() == name) ||
 			(e.snap != nil && e.snap.Snap == name) ||
-			(e.fam != nil && e.fam.Label() == name)
+			(e.fam != nil && e.fam.Label() == name) ||
+			(e.pool != nil && e.pool.Name == name)
 		if hit {
 			m.brSetCursorID(e.id)
 			return true
