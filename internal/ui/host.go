@@ -177,6 +177,21 @@ func (h *hostState) noteStatsFail(err error) {
 	h.nextTry = time.Now().Add(h.backoff)
 }
 
+// sev is the host's alarm tier: unreachable is an ERROR outright; a
+// reachable host inherits its worst pool's tier.
+func (h *hostState) sev() int {
+	if h.conn == connDown {
+		return sevErr
+	}
+	s := sevOK
+	for _, p := range h.pools {
+		if v := poolSev(p); v > s {
+			s = v
+		}
+	}
+	return s
+}
+
 // outageAge is how long the host has been dark.
 func (h *hostState) outageAge() time.Duration {
 	if h.firstFail.IsZero() {

@@ -130,7 +130,7 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 	}
 	switch h.conn {
 	case connDown:
-		lines = append(lines, " "+from+" · "+styWarn.Render(hostOutage(h)))
+		lines = append(lines, " "+from+" · "+styBad.Render(hostOutage(h)))
 		if !h.lastOK.IsZero() {
 			lines = append(lines, " "+styDim.Render("last data "+niceAge(time.Since(h.lastOK))+" ago"))
 		} else {

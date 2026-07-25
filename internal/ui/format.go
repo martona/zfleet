@@ -12,15 +12,19 @@ import (
 // look — with one deliberate exception: sparkline riser ink is 256-color,
 // because the 16-palette offers nothing between shout and mute. Old
 // terminals degrade to the nearest ANSI color.
+// WARN is BRIGHT yellow (11), not plain (3): many palettes render 3 as an
+// olive gold whose warn-ness lives entirely in its red component — for
+// protan vision that collapses into green. Bright yellow differs from
+// green in luminance, which survives every kind of color vision.
 var (
 	styGood    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	styWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	styWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	styBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	styDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styBold    = lipgloss.NewStyle().Bold(true)
 	styInv     = lipgloss.NewStyle().Reverse(true) // the mc cursor bar
 	styBar     = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	styBarWarn = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	styBarWarn = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	styBarBad  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 )
 
@@ -44,17 +48,50 @@ var (
 	sparkDead = sparkFam{styDim, styDim, styDim}
 )
 
-func healthStyle(state string) lipgloss.Style {
+// Severity: two formal alarm tiers — WARN is yellow, ERROR is red — and
+// they escalate through the chain: counters warn a pool, a pool's tier
+// colors its name, the worst pool colors its host, and an unreachable
+// host is an ERROR outright. No state is neutral: anything not ONLINE is
+// at least a WARN.
+const (
+	sevOK = iota
+	sevWarn
+	sevErr
+)
+
+func stateSev(state string) int {
 	switch state {
-	case "ONLINE":
-		return styGood
-	case "DEGRADED":
-		return styWarn
-	case "FAULTED", "UNAVAIL", "SUSPENDED":
-		return styBad
-	default:
-		return styDim
+	case "ONLINE", "AVAIL": // AVAIL: an idle hot spare is fine, not news
+		return sevOK
+	case "FAULTED", "UNAVAIL", "SUSPENDED", "REMOVED":
+		return sevErr
+	default: // DEGRADED, OFFLINE, INUSE, and whatever zfs invents next
+		return sevWarn
 	}
+}
+
+func sevStyle(sev int) lipgloss.Style {
+	switch sev {
+	case sevErr:
+		return styBad
+	case sevWarn:
+		return styWarn
+	}
+	return styGood
+}
+
+func healthStyle(state string) lipgloss.Style { return sevStyle(stateSev(state)) }
+
+// poolSev is a pool's alarm tier: its state's tier, floored at WARN when
+// any error counter anywhere in its topology is nonzero.
+func poolSev(p *zfs.Pool) int {
+	s := stateSev(p.State)
+	if s == sevOK {
+		if r, w, c := p.ErrSums(); r+w+c > 0 {
+			s = sevWarn
+		}
+	}
+	return s
 }
 
 // bar renders a capacity bar; the fill colors by fullness thresholds

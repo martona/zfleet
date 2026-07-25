@@ -103,8 +103,8 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 		h := r.host
 		name := padR(truncate(h.name, nameW), nameW)
 		if h.conn == connDown {
-			// a dark host is an alarm, not a listing: the name goes warn
-			// too, and the outage text degrades to a form that always fits
+			// an unreachable host is an ERROR, not a listing: red name,
+			// red outage text, degraded to a form that always fits
 			txt := hostOutage(h)
 			if lipgloss.Width(txt) > treeColsW-1 {
 				txt = hostOutageCompact(h)
@@ -113,7 +113,7 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 			if onCur {
 				return styInv.Render(name + " " + rest)
 			}
-			return styWarn.Bold(true).Render(name) + " " + styWarn.Render(rest)
+			return styBad.Render(name) + " " + styBad.Render(rest)
 		}
 		temp := ""
 		if h.haveTemp {
@@ -128,7 +128,16 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 		if onCur {
 			return styInv.Render(name + " " + cells)
 		}
-		return styBold.Render(name) + " " + styDim.Render(cells)
+		// the worst pool's tier colors the host — trouble is visible from
+		// the very top of the chain
+		nameSty := styBold
+		switch h.sev() {
+		case sevWarn:
+			nameSty = styWarn.Bold(true)
+		case sevErr:
+			nameSty = styBad
+		}
+		return nameSty.Render(name) + " " + styDim.Render(cells)
 
 	case rPool:
 		prefix := rep("  ", ind) + expandMark(r) + " "
@@ -157,10 +166,7 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 			return styInv.Render(prefix+name+pad+" ") + bar(r.pool.CapPct, stateCellW-1) +
 				styInv.Render(" "+capS+" "+size)
 		}
-		nameSty := healthStyle(r.pool.State)
-		if badge != "" {
-			nameSty = styWarn
-		}
+		nameSty := sevStyle(poolSev(r.pool))
 		if !rowLive(r.host) {
 			nameSty = styDim
 		}

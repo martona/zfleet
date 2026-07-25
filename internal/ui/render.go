@@ -269,8 +269,10 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		if sw < 8 {
 			sw = 8
 		}
-		ops := func(bw, n int64, key string) string {
-			cell := elastic(h.ioW, key, opsCell(bw, n))
+		// one shared elastic width for both ops cells — separate keys let a
+		// read burst widen only its own line and the right edges drift
+		ops := func(bw, n int64) string {
+			cell := elastic(h.ioW, "ops", opsCell(bw, n))
 			if bw == 0 && n == 0 {
 				return styDim.Render(cell)
 			}
@@ -278,9 +280,9 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		}
 		lines = append(lines,
 			" "+styBold.Render("io")+"   r "+ioRate(r.RBw, 7)+"  "+sparklineFam(sparkSteel, rh, sw)+
-				"  "+ops(r.RBw, r.ROps, "rops"),
+				"  "+ops(r.RBw, r.ROps),
 			"      w "+ioRate(r.WBw, 7)+"  "+sparklineFam(sparkGold, wh, sw)+
-				"  "+ops(r.WBw, r.WOps, "wops"))
+				"  "+ops(r.WBw, r.WOps))
 	} else {
 		lines = append(lines, " "+styBold.Render("io")+"   "+styDim.Render("sampling…"))
 	}
