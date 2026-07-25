@@ -54,6 +54,17 @@ func (s Ssh) runCombined(ctx context.Context, cmdline string) (string, error) {
 	return buf.String(), s.decorate(err)
 }
 
+// sshError carries a readable message while keeping the original error in
+// the chain — transportDown/cmdMissing need the exit code to survive the
+// prettification, or every failure with stderr reads as an outage.
+type sshError struct {
+	msg string
+	err error
+}
+
+func (e *sshError) Error() string { return e.msg }
+func (e *sshError) Unwrap() error { return e.err }
+
 func (s Ssh) decorate(err error) error {
 	if err == nil {
 		return nil
@@ -61,7 +72,7 @@ func (s Ssh) decorate(err error) error {
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		if msg := firstLine(string(ee.Stderr)); msg != "" {
-			return fmt.Errorf("%s: %s", s.Dest, msg)
+			return &sshError{fmt.Sprintf("%s: %s", s.Dest, msg), err}
 		}
 	}
 	return fmt.Errorf("%s: %w", s.Dest, err)
@@ -76,6 +87,14 @@ func transportDown(err error) bool {
 		return ee.ExitCode() == 255
 	}
 	return err != nil // exec-level failure (ssh missing, ctx timeout)
+}
+
+// cmdMissing reports the remote shell's "command not found" (exit 127) —
+// the mark of a basic host with no zfs installed. Such hosts are legal
+// fleet members: reachable, vitals-bearing, zero pools.
+func cmdMissing(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == 127
 }
 
 func firstLine(s string) string {
@@ -95,6 +114,9 @@ func quote(s string) string {
 func (s Ssh) PoolTexts(ctx context.Context) (string, string, error) {
 	status, err := s.run(ctx, "zpool status")
 	if err != nil {
+		if cmdMissing(err) {
+			return "", "", nil // a basic host: reachable, no zfs, no pools
+		}
 		return "", "", err
 	}
 	list, err := s.run(ctx, "zpool list -Hpv")
@@ -112,7 +134,12 @@ func (s Ssh) StatTexts(ctx context.Context) (string, string, string, error) {
 	objsets, _ := s.run(ctx, "cat /proc/spl/kstat/zfs/*/objset-* 2>/dev/null")
 	iostat, err := s.run(ctx, "zpool iostat -Hpy 1 1")
 	if err != nil {
-		return arc, "", objsets, err
+		if transportDown(err) {
+			return arc, "", objsets, err
+		}
+		// any command-level failure — zpool missing, module not loaded —
+		// is not an outage: the stats heartbeat answers for the HOST
+		return arc, "", objsets, nil
 	}
 	return arc, iostat, objsets, nil
 }

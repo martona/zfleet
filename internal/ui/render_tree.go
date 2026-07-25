@@ -135,23 +135,41 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 		name := truncate(r.pool.Name, nameW-lipgloss.Width(prefix))
 		pad := rep(" ", nameW-lipgloss.Width(prefix+name))
 		sick := zfs.StateRank(r.pool.State) != 0
+		// zfse's own bubbling: zfs never sums child counters upward, so an
+		// ONLINE pool over a counter-riddled disk warns here regardless.
+		// The row says only WARN — a summary verdict; the inspector's
+		// per-device counters are where the root cause lives.
+		badge := ""
+		if er, ew, ec := r.pool.ErrSums(); !sick && er+ew+ec > 0 {
+			badge = "WARN"
+		}
 		capS := padL(pctStr(r.pool.CapPct), capCellW)
 		size := padL(zfs.NiceBytes(r.pool.Size), usedCellW)
 		if onCur {
-			if sick {
+			switch {
+			case sick:
 				return styInv.Render(prefix + name + pad + " " +
 					padR(r.pool.State, stateCellW) + capS + " " + size)
+			case badge != "":
+				return styInv.Render(prefix + name + pad + " " +
+					padR(badge, stateCellW) + capS + " " + size)
 			}
 			return styInv.Render(prefix+name+pad+" ") + bar(r.pool.CapPct, stateCellW-1) +
 				styInv.Render(" "+capS+" "+size)
 		}
 		nameSty := healthStyle(r.pool.State)
+		if badge != "" {
+			nameSty = styWarn
+		}
 		if !rowLive(r.host) {
 			nameSty = styDim
 		}
 		state := bar(r.pool.CapPct, stateCellW-1) + " "
-		if sick {
+		switch {
+		case sick:
 			state = healthStyle(r.pool.State).Render(padR(r.pool.State, stateCellW))
+		case badge != "":
+			state = styWarn.Render(padR(badge, stateCellW))
 		}
 		return prefix + nameSty.Render(name) + pad + " " + state + dimUnit(capS) + " " + dimUnit(size)
 

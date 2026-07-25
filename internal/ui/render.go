@@ -252,42 +252,70 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 
 	lines = append(lines, "")
 
-	// row layout: " " + name(nameW) + sum(9) + " " + state(10) + 5 + 6 + 6
-	nameW := w - 39
-	if nameW > 42 {
-		nameW = 42
+	// live io, promoted above the topology: host-view grammar plus the
+	// ops/s readings a pool has earned
+	if r, ok := h.io[p.Name]; ok {
+		hist := h.ioHist[p.Name]
+		rh := make([]int64, len(hist))
+		wh := make([]int64, len(hist))
+		for j, s := range hist {
+			rh[j] = s.RBw
+			wh[j] = s.WBw
+		}
+		sw := w - 33
+		if sw > dsIOHistLen/2 {
+			sw = dsIOHistLen / 2
+		}
+		if sw < 8 {
+			sw = 8
+		}
+		ops := func(bw, n int64, key string) string {
+			cell := elastic(h.ioW, key, opsCell(bw, n))
+			if bw == 0 && n == 0 {
+				return styDim.Render(cell)
+			}
+			return dimUnit(cell)
+		}
+		lines = append(lines,
+			" "+styBold.Render("io")+"   r "+ioRate(r.RBw, 7)+"  "+sparklineFam(sparkSteel, rh, sw)+
+				"  "+ops(r.RBw, r.ROps, "rops"),
+			"      w "+ioRate(r.WBw, 7)+"  "+sparklineFam(sparkGold, wh, sw)+
+				"  "+ops(r.WBw, r.WOps, "wops"))
+	} else {
+		lines = append(lines, " "+styBold.Render("io")+"   "+styDim.Render("sampling…"))
 	}
-	if nameW < 12 {
-		nameW = 12
-	}
-	var topo []string
-	ashiftCell := ""
-	if a, ok := h.ashift[p.Name]; ok {
-		ashiftCell = styDim.Render("ashift " + strconv.Itoa(a))
-	}
-	topo = append(topo, " "+padR(ashiftCell, nameW+9)+styDim.Render(padR("STATE", 10)+padL("READ", 5)+padL("WRITE", 6)+padL("CKSUM", 6)))
+	lines = append(lines, "")
 
-	// topology renders fully expanded — j/k scrolling replaced the whole
-	// collapse mechanism; parents keep the "N× size" summary in their sum
-	// column so nothing the collapsed rows used to say is lost
+	// topology, fully expanded. The three error-counter columns are gone:
+	// zeros were noise, so the verdict column carries the story instead —
+	// ONLINE for the healthy, counters REPLACING the word on a serving
+	// device with errors, state · counters when both have news. The column
+	// sizes itself to its longest occupant.
+	type topoEnt struct {
+		depth   int
+		display string
+		sum     string
+		verdict string
+		vsty    lipgloss.Style
+		note    string
+	}
+	var ents []topoEnt
 	var walk func(v *zfs.Vdev, classPrefix string, depth int)
 	walk = func(v *zfs.Vdev, classPrefix string, depth int) {
-		display := classPrefix + v.Name
 		sum := zfs.NiceBytes(v.Size)
 		if len(v.Children) > 0 {
 			leaves := v.Leaves()
 			sum = fmt.Sprintf("%d× %s", len(leaves), zfs.NiceBytes(leaves[0].Size))
 		}
-		row := " " + rep("  ", depth) + padR(truncate(display, nameW-depth*2), nameW-depth*2) +
-			padL(sum, 9) + " " +
-			healthStyle(v.State).Render(padR(v.State, 10)) +
-			counterCell(v.ReadErr, 5) + counterCell(v.WriteErr, 6) + counterCell(v.CksumErr, 6)
-		if v.Note != "" {
-			if room := w - lipgloss.Width(row) - 2; room >= 4 {
-				row += " " + styWarn.Render(truncate(v.Note, room))
-			}
+		badge := errBadge(zfs.ErrCount(v.ReadErr), zfs.ErrCount(v.WriteErr), zfs.ErrCount(v.CksumErr), 24)
+		verdict, vsty := v.State, healthStyle(v.State)
+		switch {
+		case v.State == "ONLINE" && badge != "":
+			verdict, vsty = badge, styWarn
+		case badge != "":
+			verdict = v.State + " · " + badge
 		}
-		topo = append(topo, row)
+		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, vsty, v.Note})
 		for _, c := range v.Children {
 			walk(c, "", depth+1)
 		}
@@ -304,16 +332,33 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 			walk(v, prefix, 0)
 		}
 	}
-	lines = append(lines, topo...)
-
-	lines = append(lines, "")
-	if r, ok := h.io[p.Name]; ok {
-		lines = append(lines, " io   r "+elastic(h.ioW, "rbw", zfs.NiceBytes(r.RBw)+"/s")+
-			" · "+elastic(h.ioW, "rops", opsCell(r.RBw, r.ROps))+
-			"    w "+elastic(h.ioW, "wbw", zfs.NiceBytes(r.WBw)+"/s")+
-			" · "+elastic(h.ioW, "wops", opsCell(r.WBw, r.WOps)))
-	} else {
-		lines = append(lines, " io   "+styDim.Render("sampling…"))
+	vw := lipgloss.Width("STATE")
+	for _, e := range ents {
+		if n := lipgloss.Width(e.verdict); n > vw {
+			vw = n
+		}
+	}
+	nameW := w - 13 - vw
+	if nameW > 42 {
+		nameW = 42
+	}
+	if nameW < 12 {
+		nameW = 12
+	}
+	ashiftCell := ""
+	if a, ok := h.ashift[p.Name]; ok {
+		ashiftCell = styDim.Render("ashift " + strconv.Itoa(a))
+	}
+	lines = append(lines, " "+padR(ashiftCell, nameW+9)+" "+styDim.Render(padR("STATE", vw)))
+	for _, e := range ents {
+		row := " " + rep("  ", e.depth) + padR(truncate(e.display, nameW-e.depth*2), nameW-e.depth*2) +
+			padL(e.sum, 9) + " " + e.vsty.Render(padR(e.verdict, vw))
+		if e.note != "" {
+			if room := w - lipgloss.Width(row) - 2; room >= 4 {
+				row += " " + styWarn.Render(truncate(e.note, room))
+			}
+		}
+		lines = append(lines, row)
 	}
 
 	return lines
@@ -435,6 +480,12 @@ func strip(m *Model) string {
 			segs = append(segs, healthStyle(worst.State).Render(worst.Name+" "+worst.State))
 		}
 	}
+	for _, p := range h.pools {
+		if er, ew, ec := p.ErrSums(); er+ew+ec > 0 {
+			segs = append(segs, styWarn.Render("! "+p.Name+" "+errBadge(er, ew, ec, 20)))
+			break
+		}
+	}
 
 	if h.conn == connDown {
 		segs = append(segs, styBad.Render("! "+hostOutage(h)))
@@ -458,6 +509,7 @@ func fleetStrip(m *Model) string {
 	pools, online := 0, 0
 	var worstPool *zfs.Pool
 	worstHost := ""
+	errSeg := ""
 	scans := []string{}
 	downs := []string{}
 	for _, h := range m.hosts {
@@ -477,6 +529,9 @@ func fleetStrip(m *Model) string {
 			}
 			if worstPool == nil || zfs.StateRank(p.State) > zfs.StateRank(worstPool.State) {
 				worstPool, worstHost = p, h.name
+			}
+			if er, ew, ec := p.ErrSums(); errSeg == "" && er+ew+ec > 0 {
+				errSeg = "! " + h.name + ":" + p.Name + " " + errBadge(er, ew, ec, 20)
 			}
 			if p.Scan.State == zfs.ScanInProgress {
 				scans = append(scans, fmt.Sprintf("%s %s:%s %.0f%%", p.Scan.Kind, h.name, p.Name, p.Scan.Percent))
@@ -501,6 +556,9 @@ func fleetStrip(m *Model) string {
 			segs = append(segs, healthStyle(worstPool.State).Render(worstHost+":"+worstPool.Name+" "+worstPool.State))
 		}
 	}
+	if errSeg != "" {
+		segs = append(segs, styWarn.Render(errSeg))
+	}
 
 	for _, name := range downs {
 		segs = append(segs, styBad.Render("! "+name+" unreachable"))
@@ -509,17 +567,6 @@ func fleetStrip(m *Model) string {
 		segs = append(segs, styDim.Render("[replay]"))
 	}
 	return strings.Join(segs, styDim.Render(" │ "))
-}
-
-func counterCell(v string, w int) string {
-	if v == "" {
-		return padL("-", w)
-	}
-	cell := padL(v, w)
-	if v != "0" {
-		return styBad.Render(cell)
-	}
-	return cell
 }
 
 func pctStr(p int64) string {

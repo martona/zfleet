@@ -223,15 +223,35 @@ func main() {
 //     served locally instead of over ssh (dedupe — the hosts file is
 //     yadm-shared and must not grow ghosts), unless --no-dedupe
 func resolveHosts(replays, hostFlags multiFlag, noDedupe bool) ([]ui.HostSpec, bool) {
-	if len(replays) > 0 {
-		return resolveReplays(replays)
+	var bare []string
+	var named []ui.HostSpec
+	for _, r := range replays {
+		if i := strings.IndexByte(r, '='); i > 0 {
+			named = append(named, ui.HostSpec{Name: r[:i], Dest: "replay",
+				Src: collect.Replay{Dir: r[i+1:]}})
+		} else {
+			bare = append(bare, r)
+		}
+	}
+	// a bare --replay dir is the classic single-host fixture mode, exclusive;
+	// name=dir hosts are virtual fleet members and may ride along with live
+	// ones — puppets whose every surface is a text file, re-read each tick
+	if len(bare) > 0 {
+		if len(bare) > 1 || len(named) > 0 || len(hostFlags) > 0 {
+			fail("--replay: a bare dir is single-host; use name=dir entries to build or join a fleet")
+		}
+		return []ui.HostSpec{{Name: "replay", Src: collect.Replay{Dir: bare[0]}}}, false
 	}
 
 	entries := append(readHostsFile(), hostFlags...)
 	localOK := runtime.GOOS == "linux" && haveZpool()
 	localName := shortHostname()
 
-	if len(entries) == 0 {
+	if len(entries) == 0 && len(named) > 0 && !localOK {
+		// pure virtual fleet — fine anywhere
+		return uniquifyNames(named), true
+	}
+	if len(entries) == 0 && len(named) == 0 {
 		if runtime.GOOS != "linux" {
 			fail("live mode needs a Linux host with ZFS; use --replay <fixture-dir> or register remote hosts")
 		}
@@ -263,36 +283,9 @@ func resolveHosts(replays, hostFlags multiFlag, noDedupe bool) ([]ui.HostSpec, b
 		}
 		specs = append([]ui.HostSpec{{Name: name, Src: collect.Exec{}}}, specs...)
 	}
+	specs = append(specs, named...)
 	if len(specs) == 0 {
 		fail("no usable hosts: local has no zfs and no remotes resolved")
-	}
-	return uniquifyNames(specs), true
-}
-
-// resolveReplays builds a fleet from fixture dirs: one bare dir is the
-// classic single-host replay; name=dir entries (repeatable) form a
-// multi-host fleet — the same dir may appear under several names.
-func resolveReplays(replays multiFlag) ([]ui.HostSpec, bool) {
-	var specs []ui.HostSpec
-	named := 0
-	for _, r := range replays {
-		if i := strings.IndexByte(r, '='); i > 0 {
-			named++
-			name := r[:i]
-			specs = append(specs, ui.HostSpec{Name: name, Dest: "replay",
-				Src: collect.Replay{Dir: r[i+1:]}})
-		} else {
-			specs = append(specs, ui.HostSpec{Name: "replay", Src: collect.Replay{Dir: r}})
-		}
-	}
-	if named != 0 && named != len(replays) {
-		fail("--replay: mix of bare and name=dir forms; use one or the other")
-	}
-	if named == 0 {
-		if len(specs) != 1 {
-			fail("--replay: multiple bare dirs; use name=dir to build a fleet")
-		}
-		return specs, false
 	}
 	return uniquifyNames(specs), true
 }

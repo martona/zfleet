@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/martona/zfs-explorer/internal/zfs"
 )
 
 // ANSI palette colors only, so the user's terminal theme decides the actual
@@ -159,6 +161,52 @@ func sparklineFam(fam sparkFam, vals []int64, width int) string {
 		cell(brailleL[l]|brailleR[r], shade(l, r))
 	}
 	flush()
+	return out.String()
+}
+
+// errBadge compresses nonzero error counters into a row-width verdict:
+// "R 12 C 3", tightening to "R12C3" and finally "errors" as space runs out.
+func errBadge(r, w, c int64, maxW int) string {
+	var parts []string
+	if r > 0 {
+		parts = append(parts, "R "+zfs.NiceCount(r))
+	}
+	if w > 0 {
+		parts = append(parts, "W "+zfs.NiceCount(w))
+	}
+	if c > 0 {
+		parts = append(parts, "C "+zfs.NiceCount(c))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	s := strings.Join(parts, " ")
+	if len(s) <= maxW {
+		return s
+	}
+	if s = strings.ReplaceAll(s, " ", ""); len(s) <= maxW {
+		return s
+	}
+	return truncate("errors", maxW)
+}
+
+// dimLabels brightens digit runs and mutes everything else — words, units,
+// separators — so a phrase like "3d 22h" reads by its numbers.
+func dimLabels(s string) string {
+	isNum := func(b byte) bool { return b >= '0' && b <= '9' || b == '.' }
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		j := i
+		for j < len(s) && isNum(s[j]) == isNum(s[i]) {
+			j++
+		}
+		if isNum(s[i]) {
+			out.WriteString(s[i:j])
+		} else {
+			out.WriteString(styDim.Render(s[i:j]))
+		}
+		i = j
+	}
 	return out.String()
 }
 

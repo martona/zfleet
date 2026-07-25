@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/martona/zfs-explorer/internal/zfs"
@@ -170,45 +172,59 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 		}
 	}
 
-	// vitals
+	// vitals: labels and units muted, numbers bright — unless the number
+	// is zero, in which case the whole vital recedes
 	var vit []string
 	if h.uptimeSec > 0 {
-		vit = append(vit, "up "+zfs.NiceUptime(h.uptimeSec))
+		vit = append(vit, styDim.Render("up ")+dimLabels(zfs.NiceUptime(h.uptimeSec)))
 	}
 	if h.load1 != "" {
-		vit = append(vit, "load "+h.load1)
+		seg := styDim.Render("load " + h.load1)
+		if f, err := strconv.ParseFloat(h.load1, 64); err == nil && f > 0 {
+			seg = styDim.Render("load ") + h.load1
+		}
+		vit = append(vit, seg)
 	}
-	if h.cpuPct >= 0 {
-		vit = append(vit, fmt.Sprintf("cpu %d%%", h.cpuPct))
+	if h.cpuPct == 0 {
+		vit = append(vit, styDim.Render("cpu 0%"))
+	} else if h.cpuPct > 0 {
+		vit = append(vit, styDim.Render("cpu ")+fmt.Sprintf("%d", h.cpuPct)+styDim.Render("%"))
 	}
 	if h.haveTemp {
-		vit = append(vit, fmt.Sprintf("%s %d°C", h.tempSrc, h.tempC))
+		// "cpu 2% · cpu 45°C" stutters — the label earns its place only
+		// when the hottest sensor is NOT the cpu
+		label := ""
+		if h.tempSrc != "cpu" {
+			label = h.tempSrc + " "
+		}
+		vit = append(vit, styDim.Render(label)+fmt.Sprintf("%d", h.tempC)+styDim.Render("°C"))
 	}
 	if len(vit) > 0 {
-		line := " "
-		for i, v := range vit {
-			if i > 0 {
-				line += styDim.Render(" · ")
-			}
-			line += v
-		}
-		lines = append(lines, line)
+		lines = append(lines, " "+strings.Join(vit, styDim.Render(" · ")))
 	}
 	lines = append(lines, "")
 
-	// arc + aggregate io
+	// arc, hit ratio, and aggregate io share one label column so their
+	// sparklines sit on the same x, all showing the same window
+	sw := w - 19
+	if sw > dsIOHistLen/2 {
+		sw = dsIOHistLen / 2
+	}
 	if h.haveArc {
-		hit := ""
+		lines = append(lines, " "+styBold.Render("arc")+"    "+
+			dimUnit(zfs.NiceBytes(h.arc.Size))+styDim.Render(" / ")+dimUnit(zfs.NiceBytes(h.arc.CMax)))
+		hit := "-"
 		if dh, dm := h.arc.Hits-h.arcPrev.Hits, h.arc.Misses-h.arcPrev.Misses; dh+dm > 0 {
-			hit = fmt.Sprintf(" · hit %.1f%% ", 100*float64(dh)/float64(dh+dm)) + sparklineFam(sparkSteel, h.hitHist, 8)
+			hit = fmt.Sprintf("%.1f%%", 100*float64(dh)/float64(dh+dm))
 		}
-		lines = append(lines, " arc  "+zfs.NiceBytes(h.arc.Size)+" / "+zfs.NiceBytes(h.arc.CMax)+hit)
+		lines = append(lines, " hit    "+dimUnit(padL(hit, 7))+"  "+sparklineFam(sparkSteel, h.hitHist, sw))
 	}
 	if len(h.hostIOHist) > 0 {
 		r, wr := hostLiveIO(h)
 		rh, wh := hostIORings(h)
-		lines = append(lines, " io   r "+ioRate(r, 8)+" "+sparklineFam(sparkSteel, rh, 10)+
-			"   w "+ioRate(wr, 8)+" "+sparklineFam(sparkGold, wh, 10))
+		lines = append(lines,
+			" "+styBold.Render("io")+"   r "+ioRate(r, 7)+"  "+sparklineFam(sparkSteel, rh, sw),
+			"      w "+ioRate(wr, 7)+"  "+sparklineFam(sparkGold, wh, sw))
 	}
 	lines = append(lines, "")
 
