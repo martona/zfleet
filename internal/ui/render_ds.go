@@ -208,10 +208,41 @@ func selInspector(m *Model, w, off, height int) []string {
 		}
 		return g.ds
 	}
-	nameW := w - 13
+	const barW = 8
+	nameW := w - 14 - barW
 	if nameW < 16 {
 		nameW = 16
 	}
+	// the bars are RELATIVE: each item's own `used` scaled to the largest
+	// item in the selection. Not a share of Σ — shared blocks belong only
+	// to the whole — but exactly the "where's the meat" read the numbers
+	// make you work for.
+	var maxItem int64
+	for _, g := range groups {
+		if g.dsMark {
+			if u := g.dsUsed(); u > maxItem {
+				maxItem = u
+			}
+			continue
+		}
+		for _, s := range g.snaps {
+			if s.Used > maxItem {
+				maxItem = s.Used
+			}
+		}
+	}
+	relBar := func(v int64) string {
+		fill := 0
+		if maxItem > 0 && v > 0 {
+			fill = int(v * barW / maxItem)
+			if fill == 0 {
+				fill = 1
+			}
+		}
+		return styBar.Render(rep("▓", fill)) + styDim.Render(rep("░", barW-fill))
+	}
+	lines = append(lines, " "+rep(" ", nameW+1)+
+		styDim.Render("RELATIVE")+styDim.Render(padL("USED", 8)))
 	win0, win1 := off-height, off+2*height
 	emit := func(f func() string) {
 		if i := len(lines); i >= win0 && i <= win1 {
@@ -225,12 +256,14 @@ func selInspector(m *Model, w, off, height int) []string {
 		switch {
 		case g.dsMark:
 			emit(func() string {
+				n, ok := value(g)
 				val := "…"
-				if n, ok := value(g); ok {
+				if ok {
 					val = zfs.NiceBytes(n)
 				}
 				return " " + padR(truncate(qualify(g)+" ", nameW-11), nameW-11) +
-					styWarn.Render(padR("dataset -r", 11)) + dimUnit(padL(val, 8))
+					styWarn.Render(padR("dataset -r", 11)) + " " + relBar(n) +
+					dimUnit(padL(val, 8))
 			})
 		case g.pseudo:
 			emit(func() string {
@@ -241,12 +274,12 @@ func selInspector(m *Model, w, off, height int) []string {
 				s := s
 				emit(func() string {
 					return " " + padR(truncate(qualify(g)+"@"+s.Snap, nameW), nameW) +
-						dimUnit(padL(zfs.NiceBytes(s.Used), 8))
+						" " + relBar(s.Used) + dimUnit(padL(zfs.NiceBytes(s.Used), 8))
 				})
 			}
 			if len(g.snaps) == 0 && g.loaded {
 				emit(func() string {
-					return " " + styDim.Render(truncate(qualify(g)+"@ (marks outlived their snapshots)", nameW+8))
+					return " " + styDim.Render(truncate(qualify(g)+"@ (marks outlived their snapshots)", w-5))
 				})
 			}
 			// a failed group names its reason right under its lines — a
