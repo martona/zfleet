@@ -204,6 +204,22 @@ func (s Ssh) DiskTexts(ctx context.Context) (string, string, string, string) {
 	return aliases, sysBlock, lsblk, hwmonDev
 }
 
+func (s Ssh) SmartTexts(ctx context.Context, nodes []string) (map[string]string, bool) {
+	if _, err := s.run(ctx, "sudo -n true"); err != nil {
+		return nil, false
+	}
+	out := map[string]string{}
+	for _, n := range nodes {
+		// keep stdout even on nonzero exits — smartctl flags logged errors
+		// in its exit code while the JSON is complete
+		text, _ := s.run(ctx, "sudo -n smartctl -j -a -n standby /dev/"+quote(n))
+		if len(text) > 0 {
+			out[n] = text
+		}
+	}
+	return out, true
+}
+
 func (s Ssh) InfoTexts(ctx context.Context) (string, string, string) {
 	ver, err := s.run(ctx, "zfs version")
 	if err != nil && transportDown(err) {

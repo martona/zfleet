@@ -94,6 +94,12 @@ func main() {
 			}
 			al, sysBlock, lsblk, hwmonDev := s.Src.DiskTexts(ctx)
 			m.ApplyDisks(s.Name, al, sysBlock, lsblk, hwmonDev)
+			var nodes []string
+			for _, d := range zfs.ParseLsblkDisks(lsblk) {
+				nodes = append(nodes, d.Node)
+			}
+			smart, sudoOK := s.Src.SmartTexts(ctx, nodes)
+			m.ApplySmart(s.Name, smart, sudoOK)
 			up, load, stat, hwmon := s.Src.HostTexts(ctx)
 			m.ApplyHostVitals(s.Name, up, load, stat, hwmon)
 			ver, kernel, osrel := s.Src.InfoTexts(ctx)

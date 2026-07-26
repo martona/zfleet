@@ -116,6 +116,8 @@ type disksMsg struct {
 	sysBlock string
 	lsblk    string
 	hwmonDev string
+	smart    map[string]string
+	sudoOK   bool
 }
 type poolsTickMsg struct{}
 type statsTickMsg struct{}
@@ -167,11 +169,18 @@ func fetchInfo(h *hostState) tea.Cmd {
 func fetchDisks(h *hostState) tea.Cmd {
 	host, src := h.name, h.src
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// smartctl over a fleet of spinners takes seconds — generous
+		// timeout, all off the UI thread at the slow disk cadence
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		aliases, sysBlock, lsblk, hwmonDev := src.DiskTexts(ctx)
+		var nodes []string
+		for _, d := range zfs.ParseLsblkDisks(lsblk) {
+			nodes = append(nodes, d.Node)
+		}
+		smart, sudoOK := src.SmartTexts(ctx, nodes)
 		return disksMsg{host: host, aliases: aliases, sysBlock: sysBlock,
-			lsblk: lsblk, hwmonDev: hwmonDev}
+			lsblk: lsblk, hwmonDev: hwmonDev, smart: smart, sudoOK: sudoOK}
 	}
 }
 
@@ -285,6 +294,13 @@ func (m *Model) ApplyDisks(host, aliases, sysBlock, lsblk, hwmonDev string) {
 	}
 }
 
+// ApplySmart ingests per-drive smartctl output (also used by --dump).
+func (m *Model) ApplySmart(host string, texts map[string]string, sudoOK bool) {
+	if h := m.hostByName(host); h != nil {
+		h.applySmart(texts, sudoOK)
+	}
+}
+
 // MarkHostLive forces the connection state to live (dump helper — dumps
 // have no tick loop to establish it).
 func (m *Model) MarkHostLive(host string) {
@@ -380,6 +396,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.diskPend = false
 		h.applyDisks(msg.aliases, msg.sysBlock, msg.lsblk, msg.hwmonDev)
+		h.applySmart(msg.smart, msg.sudoOK)
 		return m, nil
 
 	case diskTickMsg:

@@ -144,12 +144,12 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 		name := truncate(r.pool.Name, nameW-lipgloss.Width(prefix))
 		pad := rep(" ", nameW-lipgloss.Width(prefix+name))
 		sick := zfs.StateRank(r.pool.State) != 0
-		// zfse's own bubbling: zfs never sums child counters upward, so an
-		// ONLINE pool over a counter-riddled disk warns here regardless.
-		// The row says only WARN — a summary verdict; the inspector's
-		// per-device counters are where the root cause lives.
+		// zfse's own bubbling: zfs never sums child counters upward and
+		// knows nothing of SMART, so an ONLINE pool over a counter-riddled
+		// or health-warning disk warns here regardless. The row says only
+		// WARN — a summary verdict; the inspector holds the root cause.
 		badge := ""
-		if er, ew, ec := r.pool.ErrSums(); !sick && er+ew+ec > 0 {
+		if !sick && r.host.poolSevFull(r.pool) > sevOK {
 			badge = "WARN"
 		}
 		capS := padL(pctStr(r.pool.CapPct), capCellW)
@@ -166,7 +166,7 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 			return styInv.Render(prefix+name+pad+" ") + bar(r.pool.CapPct, stateCellW-1) +
 				styInv.Render(" "+capS+" "+size)
 		}
-		nameSty := sevStyle(poolSev(r.pool))
+		nameSty := sevStyle(r.host.poolSevFull(r.pool))
 		if !rowLive(r.host) {
 			nameSty = styDim
 		}

@@ -89,14 +89,17 @@ type hostState struct {
 
 	// disk layer: inventory, alias/block maps for vdev resolution, and
 	// the hwmon chip→disk joins that turn chip readings into drive temps
-	disks     []zfs.Disk
-	aliases   map[string]string
-	blocks    map[string]zfs.BlockNode
-	chipDisk  map[string]string // hwmon dir → disk node
-	vdevDisk  map[string]string // status leaf name → disk node
-	chips     []zfs.HwmonChip   // latest hwmon readings, all chips
-	diskPend  bool
-	haveDisks bool
+	disks      []zfs.Disk
+	aliases    map[string]string
+	blocks     map[string]zfs.BlockNode
+	chipDisk   map[string]string // hwmon dir → disk node
+	vdevDisk   map[string]string // status leaf name → disk node
+	chips      []zfs.HwmonChip   // latest hwmon readings, all chips
+	smart      map[string]zfs.Smart
+	sudoOK     bool
+	sudoProbed bool
+	diskPend   bool
+	haveDisks  bool
 
 	// dataset caches shared by the tree screen and the drill browser
 	dsTrees     map[string]*zfs.DatasetTree
@@ -190,14 +193,20 @@ func (h *hostState) noteStatsFail(err error) {
 }
 
 // sev is the host's alarm tier: unreachable is an ERROR outright; a
-// reachable host inherits its worst pool's tier.
+// reachable host inherits the worst of its pools and its drives — a
+// warning boot disk belongs to no pool but still belongs to the host.
 func (h *hostState) sev() int {
 	if h.conn == connDown {
 		return sevErr
 	}
 	s := sevOK
 	for _, p := range h.pools {
-		if v := poolSev(p); v > s {
+		if v := h.poolSevFull(p); v > s {
+			s = v
+		}
+	}
+	for _, sm := range h.smart {
+		if v := smartSev(sm); v > s {
 			s = v
 		}
 	}
@@ -240,13 +249,17 @@ func (h *hostState) applyVitals(uptime, loadavg, stat, hwmon string) {
 }
 
 // refreshTemps distributes the latest chip readings: drive-linked chips
-// update their disk's temperature, and the host line takes the hottest
-// reading across sensors and drives alike — whatever is cooking, it is a
-// named, explorable row in the host view.
+// update their disk's temperature (smartctl fills in where hwmon is
+// blind — HBAs, spinners without drivetemp), and the host line takes the
+// hottest reading across sensors and drives alike — whatever is cooking,
+// it is a named, explorable row in the host view.
 func (h *hostState) refreshTemps() {
 	best, bestSrc := -1, ""
 	for i := range h.disks {
 		h.disks[i].TempC = -1
+		if s, ok := h.smart[h.disks[i].Node]; ok && s.TempC > 0 {
+			h.disks[i].TempC, h.disks[i].TempSrc = s.TempC, "smart"
+		}
 	}
 	for _, c := range h.chips {
 		mc := c.MaxC()
@@ -259,9 +272,6 @@ func (h *hostState) refreshTemps() {
 					h.disks[i].TempC, h.disks[i].TempSrc = mc, c.Name
 				}
 			}
-			if mc > best {
-				best, bestSrc = mc, node
-			}
 			continue
 		}
 		if mc > best {
@@ -271,9 +281,61 @@ func (h *hostState) refreshTemps() {
 			}
 		}
 	}
+	for _, d := range h.disks {
+		if d.TempC > best {
+			best, bestSrc = d.TempC, d.Node
+		}
+	}
 	if best >= 0 {
 		h.tempC, h.tempSrc, h.haveTemp = best, bestSrc, true
 	}
+}
+
+// applySmart ingests per-drive smartctl output and the sudo probe result.
+func (h *hostState) applySmart(texts map[string]string, sudoOK bool) {
+	h.sudoProbed = true
+	h.sudoOK = sudoOK
+	h.smart = map[string]zfs.Smart{}
+	for node, text := range texts {
+		if s, ok := zfs.ParseSmart(text); ok {
+			h.smart[node] = s
+		}
+	}
+	h.refreshTemps()
+}
+
+// smartSev is a drive's alarm tier: a failed self-assessment is an ERROR,
+// any critical counter is a WARN — the leading indicator zpool's lagging
+// counters can't give.
+func smartSev(s zfs.Smart) int {
+	switch {
+	case s.HaveStatus && !s.Passed:
+		return sevErr
+	case len(s.Warns) > 0:
+		return sevWarn
+	}
+	return sevOK
+}
+
+// poolSevFull extends poolSev with the pre-failure tier: the health of the
+// physical drives its vdevs stand on.
+func (h *hostState) poolSevFull(p *zfs.Pool) int {
+	s := poolSev(p)
+	for _, c := range p.Classes {
+		for _, v := range c.Vdevs {
+			for _, leaf := range v.Leaves() {
+				if len(leaf.Children) > 0 {
+					continue
+				}
+				if sm, ok := h.smart[h.vdevDisk[leaf.Name]]; ok {
+					if ds := smartSev(sm); ds > s {
+						s = ds
+					}
+				}
+			}
+		}
+	}
+	return s
 }
 
 // applyDisks ingests the DiskTexts surfaces and joins everything: alias

@@ -146,6 +146,9 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 		if age := time.Since(h.lastOK); age > 2*statsInterval+time.Second {
 			live = styWarn.Render("live · " + niceAge(age) + " ago")
 		}
+		if h.sudoOK {
+			live += styDim.Render(" · sudo")
+		}
 		lines = append(lines, " "+from+" · "+live)
 	default:
 		lines = append(lines, " "+from+" · "+styDim.Render("connecting…"))
@@ -228,11 +231,14 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 	}
 	lines = append(lines, "")
 
-	// drives: every disk the machine carries, temps where a sensor claims
-	// them — spinners without the drivetemp module wait for smartctl.
-	// Columns hug their longest occupants; shrinking comes back on the
-	// table when phase 2's extra columns bring right-side pressure.
-	lines = append(lines, " "+styBold.Render("drives"))
+	// drives: every disk the machine carries — temps, lifetime traffic and
+	// the health verdict where smartctl reaches. Columns hug their longest
+	// occupants.
+	head := " " + styBold.Render("drives")
+	if h.sudoProbed && !h.sudoOK {
+		head += " " + styDim.Render("(no passwordless sudo — smart data unavailable)")
+	}
+	lines = append(lines, head)
 	if len(h.disks) == 0 {
 		lines = append(lines, "  "+styDim.Render("none detected"))
 	}
@@ -244,6 +250,12 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 		if n := len(d.Model); n > modelW {
 			modelW = n
 		}
+	}
+	rw := func(v int64) string {
+		if v < 0 {
+			return styDim.Render(padL("-", 7))
+		}
+		return dimUnit(padL(zfs.NiceBytes(v), 7))
 	}
 	for _, d := range h.disks {
 		temp := styDim.Render(padL("-", 5))
@@ -261,8 +273,22 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 		if model == "" {
 			model = "?"
 		}
-		lines = append(lines, "  "+padR(d.Node, nodeW+2)+padR(model, modelW+1)+
-			dimUnit(padL(zfs.NiceBytes(d.Size), 7))+temp+" "+styDim.Render(media))
+		row := "  " + padR(d.Node, nodeW+2) + padR(model, modelW+1) +
+			dimUnit(padL(zfs.NiceBytes(d.Size), 7)) + temp
+		if s, ok := h.smart[d.Node]; ok {
+			row += styDim.Render("  r") + rw(s.ReadBytes) + styDim.Render(" w") + rw(s.WriteBytes)
+			verdict := "  " + styDim.Render("ok")
+			switch {
+			case s.Standby:
+				verdict = "  " + styDim.Render("zzz")
+			case smartSev(s) == sevErr:
+				verdict = "  " + styBad.Render("FAIL")
+			case smartSev(s) == sevWarn:
+				verdict = "  " + styWarn.Render("WARN")
+			}
+			row += verdict
+		}
+		lines = append(lines, row+" "+styDim.Render(media))
 	}
 	lines = append(lines, "")
 

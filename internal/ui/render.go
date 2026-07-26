@@ -192,7 +192,12 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	if errTxt == "No known data errors" {
 		errTxt = "no known data errors"
 	}
-	head = append(head, " "+healthStyle(p.State).Render(p.State)+styDim.Render(" · ")+errTxt)
+	headLine := " " + healthStyle(p.State).Render(p.State) + styDim.Render(" · ") + errTxt
+	if h.poolSevFull(p) > poolSev(p) {
+		// zfs is content but the drives beneath are not — point at the rows
+		headLine += styWarn.Render(" · drive warnings below")
+	}
+	head = append(head, headLine)
 
 	scanSty := styDim
 	if p.Scan.Errors > 0 {
@@ -300,6 +305,8 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		verdict string
 		vsty    lipgloss.Style
 		temp    string
+		read    string
+		written string
 		note    string
 	}
 	var ents []topoEnt
@@ -310,24 +317,57 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 			leaves := v.Leaves()
 			sum = fmt.Sprintf("%d× %s", len(leaves), zfs.NiceBytes(leaves[0].Size))
 		}
-		badge := errBadge(zfs.ErrCount(v.ReadErr), zfs.ErrCount(v.WriteErr), zfs.ErrCount(v.CksumErr), 24)
-		verdict, vsty := v.State, healthStyle(v.State)
-		switch {
-		case v.State == "ONLINE" && badge != "":
-			verdict, vsty = badge, styWarn
-		case badge != "":
-			verdict = v.State + " · " + badge
+		// the verdict column is the UNIFIED health of this row — zpool
+		// state, zpool counters, and the drive's own smart testimony,
+		// worst tier wins, reasons spelled out. A WARN in the tree must
+		// find its cause here, not a dead end.
+		sev := stateSev(v.State)
+		var parts []string
+		if v.State != "ONLINE" {
+			parts = append(parts, v.State)
 		}
-		temp := ""
+		if badge := errBadge(zfs.ErrCount(v.ReadErr), zfs.ErrCount(v.WriteErr), zfs.ErrCount(v.CksumErr), 24); badge != "" {
+			parts = append(parts, badge)
+			if sev < sevWarn {
+				sev = sevWarn
+			}
+		}
+		temp, read, written := "", "", ""
 		if len(v.Children) == 0 {
 			if d := h.diskFor(v.Name); d != nil {
-				temp = "-" // resolved but unsensed: smartctl's turn, phase 2
+				temp = "-" // resolved but unsensed
 				if d.TempC >= 0 {
 					temp = fmt.Sprintf("%d°C", d.TempC)
 				}
+				if s, ok := h.smart[d.Node]; ok {
+					if s.ReadBytes >= 0 {
+						read = zfs.NiceBytes(s.ReadBytes)
+					}
+					if s.WriteBytes >= 0 {
+						written = zfs.NiceBytes(s.WriteBytes)
+					}
+					switch ds := smartSev(s); {
+					case ds == sevErr:
+						parts = append(parts, "smart FAIL")
+						sev = sevErr
+					case ds == sevWarn:
+						txt := strings.Join(s.Warns, " · ")
+						if len(txt) > 30 {
+							txt = "smart WARN"
+						}
+						parts = append(parts, txt)
+						if sev < sevWarn {
+							sev = sevWarn
+						}
+					}
+				}
 			}
 		}
-		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, vsty, temp, v.Note})
+		verdict := strings.Join(parts, " · ")
+		if verdict == "" {
+			verdict = v.State
+		}
+		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, sevStyle(sev), temp, read, written, v.Note})
 		for _, c := range v.Children {
 			walk(c, "", depth+1)
 		}
@@ -345,12 +385,20 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		}
 	}
 	vw := lipgloss.Width("STATE")
+	haveLife := false
 	for _, e := range ents {
 		if n := lipgloss.Width(e.verdict); n > vw {
 			vw = n
 		}
+		if e.read != "" || e.written != "" {
+			haveLife = true
+		}
 	}
-	nameW := w - 13 - vw
+	lifeW := 0
+	if haveLife {
+		lifeW = 14 // two lifetime odometers where the counter columns once sat
+	}
+	nameW := w - 13 - vw - lifeW
 	if nameW > 42 {
 		nameW = 42
 	}
@@ -361,7 +409,17 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	if a, ok := h.ashift[p.Name]; ok {
 		ashiftCell = styDim.Render("ashift " + strconv.Itoa(a))
 	}
-	lines = append(lines, " "+padR(ashiftCell, nameW+9)+" "+styDim.Render(padR("STATE", vw)+padL("TEMP", 6)))
+	topoHead := padR("STATE", vw) + padL("TEMP", 6)
+	if haveLife {
+		topoHead += padL("READ", 7) + padL("WRIT", 7)
+	}
+	lines = append(lines, " "+padR(ashiftCell, nameW+9)+" "+styDim.Render(topoHead))
+	life := func(v string) string {
+		if v == "" {
+			return rep(" ", 7)
+		}
+		return dimUnit(padL(v, 7))
+	}
 	for _, e := range ents {
 		row := " " + rep("  ", e.depth) + padR(truncate(e.display, nameW-e.depth*2), nameW-e.depth*2) +
 			padL(e.sum, 9) + " " + e.vsty.Render(padR(e.verdict, vw))
@@ -370,6 +428,9 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 			row += styDim.Render(padL(e.temp, 6))
 		default:
 			row += dimUnit(padL(e.temp, 6))
+		}
+		if haveLife {
+			row += life(e.read) + life(e.written)
 		}
 		if e.note != "" {
 			if room := w - lipgloss.Width(row) - 2; room >= 4 {

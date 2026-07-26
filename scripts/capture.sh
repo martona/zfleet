@@ -61,6 +61,16 @@ sh_run sys-block.out 'find /sys/class/block -maxdepth 1 -type l -printf "%f %l\n
 sh_run lsblk-disks.out 'lsblk -bdP -o NAME,SIZE,ROTA,MODEL,SERIAL 2>/dev/null'
 sh_run hwmon-dev.out 'for h in /sys/class/hwmon/hwmon*; do [ -e "$h/device" ] && echo "$h $(readlink -f "$h/device")"; done; true'
 
+# smart surfaces (phase 2): passwordless sudo only; -n standby politely
+# skips sleeping drives rather than waking them for a checkup
+if sudo -n true 2>/dev/null; then
+	echo ok >"$d/sudo-ok"
+	for disk in $(lsblk -bdno NAME 2>/dev/null | grep -Ev "^(loop|zd|sr|nbd|dm-)"); do
+		sudo -n smartctl -j -a -n standby "/dev/$disk" >"$d/smart-$disk.json" 2>>"$m"
+		echo "exit=$? smart-$disk.json <= smartctl -j -a -n standby /dev/$disk" >>"$m"
+	done
+fi
+
 # host surfaces (multi-host round): vitals + identity
 run uptime.out cat /proc/uptime
 run loadavg.out cat /proc/loadavg

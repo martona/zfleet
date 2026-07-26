@@ -56,6 +56,10 @@ type Source interface {
 	// symlink universe, the /sys/class/block map, the lsblk inventory,
 	// and hwmon chip→device links. Best-effort.
 	DiskTexts(ctx context.Context) (aliases, sysBlock, lsblk, hwmonDev string)
+	// SmartTexts probes for passwordless sudo and, when granted, returns
+	// `smartctl -j -a -n standby` output per disk node. sudoOK reports the
+	// probe — false means the degraded no-root experience, not an error.
+	SmartTexts(ctx context.Context, nodes []string) (texts map[string]string, sudoOK bool)
 	Name() string
 }
 
@@ -183,6 +187,23 @@ func (Exec) DiskTexts(ctx context.Context) (string, string, string, string) {
 		}
 	}
 	return a.String(), sb.String(), string(lsblk), hd.String()
+}
+
+func (Exec) SmartTexts(ctx context.Context, nodes []string) (map[string]string, bool) {
+	if exec.CommandContext(ctx, "sudo", "-n", "true").Run() != nil {
+		return nil, false
+	}
+	out := map[string]string{}
+	for _, n := range nodes {
+		// smartctl exits nonzero for logged errors while still emitting
+		// full JSON — keep whatever stdout arrived
+		b, _ := exec.CommandContext(ctx, "sudo", "-n", "smartctl",
+			"-j", "-a", "-n", "standby", "/dev/"+n).Output()
+		if len(b) > 0 {
+			out[n] = string(b)
+		}
+	}
+	return out, true
 }
 
 func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {
@@ -317,6 +338,19 @@ func (r Replay) DiskTexts(context.Context) (string, string, string, string) {
 	lsblk, _ := r.read("lsblk-disks.out")
 	hwmonDev, _ := r.read("hwmon-dev.out")
 	return aliases, sysBlock, lsblk, hwmonDev
+}
+
+func (r Replay) SmartTexts(_ context.Context, nodes []string) (map[string]string, bool) {
+	if _, err := r.read("sudo-ok"); err != nil {
+		return nil, false
+	}
+	out := map[string]string{}
+	for _, n := range nodes {
+		if s, err := r.read("smart-" + n + ".json"); err == nil {
+			out[n] = s
+		}
+	}
+	return out, true
 }
 
 func (Replay) DestroyDryRun(context.Context, string) (string, error) {
