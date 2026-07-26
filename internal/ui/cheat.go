@@ -27,6 +27,9 @@ func (m *Model) cheatHints() []keyHint {
 }
 
 func (m *Model) cheatBase() []keyHint {
+	if m.ackPop {
+		return []keyHint{{"enter", "ack"}, {"↑↓", "move"}, {"esc", "close"}}
+	}
 	switch m.mode {
 	case modePerf:
 		hints := []keyHint{{"tab/←→", "pool"}}
@@ -93,6 +96,9 @@ func (m *Model) cheatBase() []keyHint {
 			head = append(head, keyHint{"space", "select"})
 		case rSnap:
 			head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
+		}
+		if m.ackPending() > 0 {
+			head = append(head, keyHint{"a", "acks"})
 		}
 		return append(head, keyHint{"/", "filter"}, keyHint{"s", "sort"},
 			keyHint{"p", "perf"}, keyHint{"q", "quit"})

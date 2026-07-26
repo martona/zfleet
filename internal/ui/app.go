@@ -51,6 +51,14 @@ type Model struct {
 	// v: drive check ledgers for ALL drives, not just warned ones
 	verboseDrives bool
 
+	// acknowledgements: the ledger every hostState shares, plus the popup
+	acks    map[string]string // "MODEL_SERIAL\x00checkID" → value ("" = any)
+	ackPath string
+	ackErr  string
+	ackPop  bool
+	ackList []ackEntry
+	ackCur  int
+
 	perf    perfState
 	perfMem map[string]string // per-host remembered perf pool
 
@@ -71,11 +79,15 @@ func New(specs []HostSpec, multiHost bool) *Model {
 		expanded:     map[string]bool{},
 		snapsShown:   map[string]bool{},
 		marks:        map[string]bool{},
+		acks:         map[string]string{},
+		ackPath:      defaultAckPath(),
 		perfMem:      map[string]string{},
 		fleetW:       map[string]int{},
 	}
 	for _, s := range specs {
-		m.hosts = append(m.hosts, newHostState(s.Name, s.Dest, s.Src))
+		h := newHostState(s.Name, s.Dest, s.Src)
+		h.acks = m.acks // one shared ledger, mutated in place
+		m.hosts = append(m.hosts, h)
 	}
 	return m
 }
@@ -569,6 +581,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Tick(perfInterval, func(time.Time) tea.Msg { return perfTickMsg{} }))
 
 	case tea.KeyMsg:
+		if m.ackPop {
+			if s := msg.String(); s == "q" || s == "ctrl+c" {
+				return m, tea.Quit
+			}
+			m.ackKeys(msg.String())
+			return m, nil
+		}
 		switch m.mode {
 		case modePerf:
 			return m.perfKeys(msg)

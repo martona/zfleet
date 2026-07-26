@@ -104,6 +104,9 @@ func frame(m *Model) string {
 		b.WriteString("├" + rep("─", inner) + "┤\n")
 		b.WriteString("│" + fit(strip(m), inner) + "│\n")
 		b.WriteString(cheatBorder(m, inner))
+		if m.ackPop {
+			return ackOverlay(m, b.String())
+		}
 		return b.String()
 	}
 
@@ -181,6 +184,9 @@ func frame(m *Model) string {
 	b.WriteString("├" + rep("─", leftW) + "┴" + rep("─", rightW) + "┤\n")
 	b.WriteString("│" + fit(strip(m), m.w-2) + "│\n")
 	b.WriteString(cheatBorder(m, m.w-2))
+	if m.ackPop {
+		return ackOverlay(m, b.String())
+	}
 	return b.String()
 }
 
@@ -347,9 +353,10 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 					if s.WriteBytes >= 0 {
 						written = zfs.NiceBytes(s.WriteBytes)
 					}
-					// the tier joins the verdict; the drill beneath carries
-					// the factfinding — cause and alarm in the same panel
-					switch smartSev(s) {
+					// the EFFECTIVE tier joins the verdict; the drill
+					// beneath carries the factfinding — cause and alarm in
+					// the same panel. Fully-acked drives read "ack".
+					switch h.diskSmartSev(d.Node) {
 					case sevErr:
 						parts = append(parts, "FAIL")
 						sev = sevErr
@@ -358,13 +365,18 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 						if sev < sevWarn {
 							sev = sevWarn
 						}
+					default:
+						if smartSev(s) > sevOK {
+							parts = append(parts, "ack")
+						}
 					}
-					// any alarm tier on this leaf — state, counters, or the
-					// drive's own — lays the smart ledger out beneath it;
-					// an all-ok ledger under a counter badge is itself a
-					// finding (the errors are upstream of the platters)
+					// any UNANSWERED alarm on this leaf — state, counters,
+					// or the drive's own — lays the smart ledger out
+					// beneath it; an all-ok ledger under a counter badge is
+					// itself a finding (the errors are upstream of the
+					// platters)
 					if m.verboseDrives || sev > sevOK {
-						drill = drillLines(s, " "+rep("  ", depth+1)+"  ", "")
+						drill = drillLines(h, d, s, " "+rep("  ", depth+1)+"  ", "")
 					}
 				}
 			}

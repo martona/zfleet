@@ -115,6 +115,10 @@ type hostState struct {
 	snapSweepAt   map[string]time.Time
 	snapSweepPend map[string]bool
 
+	// the ack ledger — the ONE map the Model owns, shared by reference so
+	// severity math here can consult it
+	acks map[string]string
+
 	// grow-only readout widths; ioW is per-pool (reset on selection
 	// change), stripW lives for the session
 	ioW    map[string]int
@@ -234,8 +238,8 @@ func (h *hostState) sev() int {
 			s = v
 		}
 	}
-	for _, sm := range h.smart {
-		if v := smartSev(sm); v > s {
+	for node := range h.smart {
+		if v := h.diskSmartSev(node); v > s {
 			s = v
 		}
 	}
@@ -356,10 +360,8 @@ func (h *hostState) poolSevFull(p *zfs.Pool) int {
 				if len(leaf.Children) > 0 {
 					continue
 				}
-				if sm, ok := h.smart[h.vdevDisk[leaf.Name]]; ok {
-					if ds := smartSev(sm); ds > s {
-						s = ds
-					}
+				if ds := h.diskSmartSev(h.vdevDisk[leaf.Name]); ds > s {
+					s = ds
 				}
 			}
 		}

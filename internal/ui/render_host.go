@@ -238,6 +238,9 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 	if h.sudoProbed && !h.sudoOK {
 		head += " " + styDim.Render("(no passwordless sudo — smart data unavailable)")
 	}
+	if h.ackPendingHost() > 0 {
+		head += "  " + keyChip("a", "ack warnings")
+	}
 	lines = append(lines, head)
 	if len(h.disks) == 0 {
 		lines = append(lines, "  "+styDim.Render("none detected"))
@@ -277,23 +280,28 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 			dimUnit(padL(zfs.NiceBytes(d.Size), 7)) + temp
 		if s, ok := h.smart[d.Node]; ok {
 			row += styDim.Render("  r") + rw(s.ReadBytes) + styDim.Render(" w") + rw(s.WriteBytes)
+			eff := h.diskSmartSev(d.Node)
 			verdict := "  " + styDim.Render("ok")
 			switch {
 			case s.Standby:
 				verdict = "  " + styDim.Render("zzz")
-			case smartSev(s) == sevErr:
+			case eff == sevErr:
 				verdict = "  " + styBad.Render("FAIL")
-			case smartSev(s) == sevWarn:
+			case eff == sevWarn:
 				verdict = "  " + styWarn.Render("WARN")
+			case smartSev(s) > sevOK:
+				// warns exist, all answered — quiet, but not "ok"
+				verdict = "  " + styDim.Render("ack")
 			}
 			row += verdict
 		}
 		lines = append(lines, row+" "+styDim.Render(media))
-		// the drill: a warned drive lays out its whole check ledger right
-		// here — no navigation, at worst some j/k
-		if s, ok := h.smart[d.Node]; ok && (m.verboseDrives || smartSev(s) > sevOK) {
+		// the drill: an UNANSWERED warn lays out its whole check ledger
+		// right here — no navigation, at worst some j/k. Acked drives fold
+		// quiet again; v reveals everything.
+		if s, ok := h.smart[d.Node]; ok && (m.verboseDrives || h.diskSmartSev(d.Node) > sevOK) {
 			serves := strings.Join(h.poolsServedBy(d.Node), ", ")
-			lines = append(lines, drillLines(s, "      ", serves)...)
+			lines = append(lines, drillLines(h, &d, s, "      ", serves)...)
 		}
 	}
 	lines = append(lines, "")
@@ -368,10 +376,11 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 // drillLines renders a drive's full check ledger — every health check
 // performed, its measured value, its verdict. Passing rows recede whole;
 // warn/fail rows keep bright values and spell their tier, so the cause of
-// a WARN is unmissable in the very panel that raised it. A non-empty
-// serves list appends the blast-radius line (host roster only — the pool
-// view already knows which pool it is).
-func drillLines(s zfs.Smart, indent, serves string) []string {
+// a WARN is unmissable in the very panel that raised it. Acked warns read
+// a dim "acked" — answered, not clean. A non-empty serves list appends
+// the blast-radius line (host roster only — the pool view already knows
+// which pool it is).
+func drillLines(h *hostState, d *zfs.Disk, s zfs.Smart, indent, serves string) []string {
 	if len(s.Checks) == 0 {
 		return nil
 	}
@@ -387,10 +396,12 @@ func drillLines(s zfs.Smart, indent, serves string) []string {
 	var out []string
 	for _, c := range s.Checks {
 		body := padR(c.Label, labW+2) + padL(c.Value, valW)
-		switch c.Sev {
-		case zfs.CheckFail:
+		switch {
+		case c.Sev > zfs.CheckOK && h.ackedCheck(d, c):
+			out = append(out, indent+styDim.Render(body+"  acked"))
+		case c.Sev == zfs.CheckFail:
 			out = append(out, indent+body+"  "+styBad.Render("FAIL"))
-		case zfs.CheckWarn:
+		case c.Sev == zfs.CheckWarn:
 			out = append(out, indent+body+"  "+styWarn.Render("WARN"))
 		default:
 			out = append(out, indent+styDim.Render(body+"  ok"))

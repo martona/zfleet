@@ -39,11 +39,14 @@ func main() {
 	mark := flag.String("mark", "", "comma-separated snapshot names to mark within the single --snaps dataset (dump)")
 	filterFlag := flag.String("filter", "", "filter pattern for --dump: ds[@snap], substring or glob; sweeps the fleet like the live / key")
 	vdrives := flag.Bool("vdrives", false, "show every drive's check ledger in --dump (the live v toggle)")
+	ackFile := flag.String("ack-file", "", "acknowledgement ledger `path` (default ~/.config/zfse/ack.conf)")
+	ackPopup := flag.Bool("ack-popup", false, "open the acknowledge popup in --dump")
 	perf := flag.String("perf", "", "pool ([host:]pool) whose performance screen to render for --dump")
 	flag.Parse()
 
 	specs, multi := resolveHosts(replays, hostFlags, *noDedupe)
 	m := ui.New(specs, multi)
+	m.SetAckFile(*ackFile)
 
 	// hostFor resolves an optional "host:" prefix on dump arguments,
 	// defaulting to the first host. Pool and dataset names cannot contain
@@ -235,6 +238,9 @@ func main() {
 			}
 		}
 		m.SetVerboseDrives(*vdrives)
+		if *ackPopup {
+			m.OpenAckPopup()
+		}
 		m.SetSize(*width, *height)
 		fmt.Println(m.View())
 		return
