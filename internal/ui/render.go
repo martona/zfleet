@@ -74,6 +74,9 @@ func frame(m *Model) string {
 		if ft := m.filterTitle(); ft != "" && m.mode == modePools {
 			heading = ft
 		}
+		if m.mode == modePools && len(m.marks) > 0 {
+			heading += fmt.Sprintf(" · %d marked", len(m.marks))
+		}
 		if m.mode == modePerf {
 			heading = "performance · " + m.perf.pool
 			if m.multiHost && m.perf.host != nil {
@@ -127,6 +130,9 @@ func frame(m *Model) string {
 	if ft := m.filterTitle(); ft != "" {
 		leftTitle = ft
 	}
+	if len(m.marks) > 0 {
+		leftTitle += fmt.Sprintf(" · %d marked", len(m.marks))
+	}
 	var rightTitle string
 	var right []string
 	left := treeNarrowPane(m, leftW, contentH)
@@ -157,10 +163,10 @@ func frame(m *Model) string {
 			right = dsInspector(m, row.host, row.ds, rightW)
 		}
 	}
-	// while the cursor stays in the marks' home dataset, the panel answers
-	// for the selection as a whole
-	if len(m.marks) > 0 && (row.id == m.markOwner || row.parentID == m.markOwner) {
-		rightTitle = fmt.Sprintf("selection (%d)", len(m.markedSnaps()))
+	// while the cursor stays in the selection's world, the panel answers
+	// for the collection as a whole
+	if m.inMarkContext(row) {
+		rightTitle = fmt.Sprintf("selection (%d)", len(m.marks))
 		right = selInspector(m, rightW)
 	}
 	panelKey := fmt.Sprintf("t|%s|%d", m.treeSel, m.markGen)

@@ -39,10 +39,11 @@ type Model struct {
 	snapsShown   map[string]bool // dataset row ids whose snapshots are t-toggled into the tree
 	treeSortUsed bool
 
-	// snapshot marks: one dataset's worth at a time, for the reclaim math
-	marks     map[string]bool // snap short names
-	markOwner string          // dataset row id owning the marks
-	markGen   int             // bumped per change; debounces the dry-run
+	// reclaim marks, fleet-wide: row ids — "host\x00ds" (whole dataset),
+	// "host\x00ds@snap", or "host\x00ds@" (all-snaps pseudo). Inheritance
+	// and splitting keep the set overlap-free by construction.
+	marks   map[string]bool
+	markGen int // bumped per change; debounces the dry-runs
 
 	// the / filter: pattern "ds[@snap]"; active whenever filter != ""
 	filter   string
@@ -486,6 +487,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			delete(h.dsSnapsPend, msg.ds)
 			if msg.err == nil {
 				m.ApplySnaps(msg.host, msg.ds, msg.text)
+				if len(m.marks) > 0 {
+					// a pseudo-mark may just have become resolvable
+					return m, m.markDebounce()
+				}
 			}
 		}
 		return m, nil
@@ -538,11 +543,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case dryTickMsg:
-		if msg.gen == m.markGen && len(m.marks) > 0 {
-			h, _ := m.markHostDs()
-			return m, m.ensureDryCmd(h, m.MarkTarget())
+		if msg.gen != m.markGen || len(m.marks) == 0 {
+			return m, nil
 		}
-		return m, nil
+		// fan the honest arithmetic out: one grouped dry-run per snapshot
+		// group, a snapshot-list fetch for any unresolved pseudo
+		var cmds []tea.Cmd
+		for _, g := range m.markGroups() {
+			switch {
+			case g.dsMark || g.h == nil:
+			case g.pseudo:
+				cmds = append(cmds, m.ensureSnapsCmd(g.h, g.ds))
+			default:
+				if t := g.target(); t != "" {
+					cmds = append(cmds, m.ensureDryCmd(g.h, t))
+				}
+			}
+		}
+		return m, tea.Batch(cmds...)
 
 	case dryRunMsg:
 		if h := m.hostByName(msg.host); h != nil {

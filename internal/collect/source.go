@@ -217,8 +217,9 @@ func (Exec) SmartTexts(ctx context.Context, nodes []string) (map[string]string, 
 }
 
 func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {
-	// args are passed as a vector (no shell), and -n is pinned here
-	out, err := exec.CommandContext(ctx, "zfs", "destroy", "-n", "-v", target).CombinedOutput()
+	// args are passed as a vector (no shell), and -n is pinned here. -p
+	// makes the reclaim figure machine-readable for the Σ math.
+	out, err := exec.CommandContext(ctx, "zfs", "destroy", "-n", "-v", "-p", target).CombinedOutput()
 	return string(out), err
 }
 

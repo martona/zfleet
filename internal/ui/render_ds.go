@@ -18,8 +18,23 @@ func keyChip(key, label string) string {
 	return styInv.Render(" "+key+" ") + " " + label
 }
 
-// reclaimLines renders the dry-run verdict for a target: the verbatim
-// "would reclaim" line once known, the Σ lower bound only until then.
+// dryReclaim extracts the reclaim bytes from a cached `-nvp` dry-run.
+func dryReclaim(r *dryResult) (int64, bool) {
+	if r == nil || r.pending || r.errText != "" {
+		return 0, false
+	}
+	for _, l := range strings.Split(r.text, "\n") {
+		f := strings.Fields(l)
+		if len(f) == 2 && f[0] == "reclaim" {
+			n, err := strconv.ParseInt(f[1], 10, 64)
+			return n, err == nil
+		}
+	}
+	return 0, false
+}
+
+// reclaimLines renders the dry-run verdict for a target: the exact figure
+// once known, the Σ lower bound only until then.
 func reclaimLines(h *hostState, target string, snaps []*zfs.Snapshot, w int) []string {
 	var sum int64
 	for _, s := range snaps {
@@ -33,6 +48,10 @@ func reclaimLines(h *hostState, target string, snaps []*zfs.Snapshot, w int) []s
 			" " + styDim.Render("dry-run: "+truncate(r.errText, w-12)),
 		}
 	case r != nil && !r.pending && r.text != "":
+		if n, ok := dryReclaim(r); ok {
+			return []string{" " + styGood.Render("would reclaim "+zfs.NiceBytes(n))}
+		}
+		// legacy non-parseable output: show zfs's own words
 		reclaim := ""
 		for _, l := range strings.Split(r.text, "\n") {
 			if strings.Contains(l, "would reclaim") {
@@ -97,26 +116,110 @@ func snapTable(snaps []*zfs.Snapshot, w int) []string {
 	return lines
 }
 
-// selInspector shows the marked snapshots and the authoritative reclaim
-// figure — per-snapshot sums lie (shared blocks), the dry-run doesn't.
+// selInspector is the collection: every marked thing grouped per dataset,
+// each group with its honest number — grouped dry-run reclaim for
+// snapshot sets (per-snapshot sums lie about shared blocks), recursive
+// `used` for whole datasets — and the Σ across the fleet.
 func selInspector(m *Model, w int) []string {
-	h, ds := m.markHostDs()
-	sel := m.markedSnaps()
-	lines := []string{
-		fmt.Sprintf(" %d snapshots selected", len(sel)),
-		" " + styDim.Render("of "+truncate(ds, w-6)),
-		"",
+	groups := m.markGroups()
+	hosts := map[string]bool{}
+	for _, g := range groups {
+		if g.h != nil {
+			hosts[g.h.name] = true
+		}
 	}
-	lines = append(lines, reclaimLines(h, m.MarkTarget(), sel, w)...)
-	lines = append(lines, "")
-	show := sel
-	if len(show) > 12 {
-		lines = append(lines, " "+styDim.Render(fmt.Sprintf("… %d more", len(show)-12)))
-		show = show[len(show)-12:]
+	head := fmt.Sprintf(" %d marked · %d groups", len(m.marks), len(groups))
+	if m.multiHost {
+		head += fmt.Sprintf(" · %d hosts", len(hosts))
 	}
-	lines = append(lines, snapTable(show, w)...)
+	lines := []string{head, ""}
+
+	// Σ: exact components only; anything still computing is counted, not
+	// guessed
+	var sum int64
+	pending := 0
+	value := func(g markGroup) (int64, bool) {
+		switch {
+		case g.dsMark:
+			u := g.dsUsed()
+			return u, u >= 0
+		case g.pseudo, g.h == nil:
+			return 0, false
+		case len(g.snaps) == 0:
+			// marks referencing snapshots that no longer exist are worth
+			// exactly nothing — but only once the list has confirmed it
+			return 0, g.loaded
+		default:
+			return dryReclaim(g.h.dryCache[g.target()])
+		}
+	}
+	for _, g := range groups {
+		if n, ok := value(g); ok {
+			sum += n
+		} else {
+			pending++
+		}
+	}
+	sigma := " " + styBold.Render("Σ would free ") + styGood.Render(zfs.NiceBytes(sum))
+	if pending > 0 {
+		sigma = " " + styBold.Render("Σ would free ≥ ") + zfs.NiceBytes(sum) +
+			styDim.Render(fmt.Sprintf(" · %d unresolved", pending))
+	}
+	lines = append(lines, sigma, "")
+
+	qualify := func(g markGroup) string {
+		if m.multiHost && g.h != nil {
+			return g.h.name + ":" + g.ds
+		}
+		return g.ds
+	}
+	nameW := 12
+	for _, g := range groups {
+		if n := len(qualify(g)); n > nameW {
+			nameW = n
+		}
+	}
+	if max := w - 27; nameW > max {
+		nameW = max
+	}
+	for _, g := range groups {
+		kind := "dataset -r"
+		switch {
+		case g.pseudo:
+			kind = "all snaps"
+		case !g.dsMark && len(g.snaps) == 1:
+			kind = "1 snap"
+		case !g.dsMark:
+			kind = fmt.Sprintf("%d snaps", len(g.snaps))
+		}
+		val := styDim.Render(padL("…", 9))
+		if n, ok := value(g); ok {
+			if g.dsMark {
+				val = dimUnit(padL(zfs.NiceBytes(n), 9))
+			} else {
+				val = styGood.Render(padL(zfs.NiceBytes(n), 9))
+			}
+		} else if !g.dsMark && !g.pseudo && g.h != nil {
+			if r := g.h.dryCache[g.target()]; r != nil && r.errText != "" {
+				val = styDim.Render(padL("n/a", 9)) // dry-run failed; Σ stays honest
+			}
+		}
+		lines = append(lines, " "+padR(truncate(qualify(g), nameW), nameW)+" "+
+			styDim.Render(padR(kind, 11))+val)
+	}
+
+	// a single snapshot group keeps the old intimacy: its member ledger
+	if len(groups) == 1 && !groups[0].dsMark && !groups[0].pseudo {
+		show := groups[0].snaps
+		lines = append(lines, "")
+		if len(show) > 12 {
+			lines = append(lines, " "+styDim.Render(fmt.Sprintf("… %d more", len(show)-12)))
+			show = show[len(show)-12:]
+		}
+		lines = append(lines, snapTable(show, w)...)
+	}
 	lines = append(lines, "",
-		" "+keyChip("space", "toggle")+styDim.Render(" · ")+keyChip("esc", "clear"))
+		" "+keyChip("space", "toggle")+styDim.Render(" · ")+keyChip("esc", "clear all"))
 	return lines
 }
 

@@ -169,8 +169,9 @@ func (s Ssh) PoolProps(ctx context.Context) (string, error) {
 }
 
 func (s Ssh) DestroyDryRun(ctx context.Context, target string) (string, error) {
-	// -n is pinned in this string; this never destroys anything
-	return s.runCombined(ctx, "zfs destroy -n -v "+quote(target))
+	// -n is pinned in this string; this never destroys anything. -p makes
+	// the reclaim figure machine-readable for the Σ math.
+	return s.runCombined(ctx, "zfs destroy -n -v -p "+quote(target))
 }
 
 func (s Ssh) PerfTexts(ctx context.Context, pool string) (string, string, string, string, string, error) {

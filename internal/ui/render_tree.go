@@ -187,12 +187,19 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 		return prefix + nameSty.Render(name) + pad + " " + state + dimUnit(capS) + " " + dimUnit(size)
 
 	case rDataset:
-		prefix := rep("  ", ind+r.depth) + expandMark(r) + " "
+		markCh := " "
+		if r.sel {
+			markCh = "*"
+		}
+		prefix := rep("  ", ind+r.depth) + expandMark(r) + markCh
 		name := truncate(r.ds.Base(), nameW-lipgloss.Width(prefix))
 		used := padL(zfs.NiceBytes(r.ds.Used), usedCellW)
 		lead := padR(prefix+name, nameW) + " " + rep(" ", stateCellW+capCellW) + " "
 		if onCur {
 			return styInv.Render(lead + used)
+		}
+		if r.sel {
+			return styWarn.Render(lead + used)
 		}
 		if m.filter != "" && !r.hit {
 			// structural ancestor of a match — the path, not the prize
@@ -202,7 +209,7 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 
 	case rFam:
 		markCh := " "
-		if m.famAllMarked(r) {
+		if r.sel {
 			markCh = "*"
 		}
 		prefix := rep("  ", ind+r.depth) + expandMark(r) + markCh
@@ -219,7 +226,7 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 
 	case rSnap:
 		markCh := " "
-		if r.parentID == m.markOwner && m.marks[r.snap.Snap] {
+		if r.sel {
 			markCh = "*"
 		}
 		prefix := rep("  ", ind+r.depth) + markCh + " "

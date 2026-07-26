@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,52 +41,193 @@ type dryResult struct {
 	pending bool
 }
 
-// The mark set lives on one dataset at a time — reclaim math across
-// datasets is meaningless. Marking anywhere else moves the selection there.
+// The mark set: reclaim selections across datasets and hosts. Mark ids
+// are tree row ids — "host\x00ds" marks a whole dataset (delete means -r,
+// worth its `used`), "host\x00ds@snap" one snapshot, and the internal
+// "host\x00ds@" pseudo-mark means "every snapshot of ds" (minted by a
+// split before the snapshot list has loaded; resolves when it lands).
+//
+// Selection INHERITS: a marked dataset covers its whole subtree — covered
+// rows render selected but are never in the set. Deselecting inside a
+// covered subtree SPLITS the ancestor into the zfs-true decomposition
+// (the ancestor survives: its snaps and the untouched siblings become
+// manual marks), and marking a dataset absorbs any marks beneath it. By
+// construction the set never double-counts.
 
-// markHostDs resolves the owning (host, dataset) of the current marks.
-func (m *Model) markHostDs() (*hostState, string) {
-	i := strings.IndexByte(m.markOwner, 0)
-	if i < 0 {
-		return nil, ""
-	}
-	return m.hostByName(m.markOwner[:i]), m.markOwner[i+1:]
+// dsMarkable rejects the rows a mark may not claim: pool root datasets
+// (that is pool demolition, not housekeeping).
+func dsMarkable(r treeRow) bool {
+	return r.kind == rDataset && r.depth > 1
 }
 
-// toggleMark flips selection on a snapshot row or a whole family at once.
+// coveringDs returns the marked dataset at or above dsName ("" when
+// uncovered). The invariant allows at most one; pool roots are never
+// markable, so two segments is as high as the scan goes.
+func (m *Model) coveringDs(h *hostState, dsName string) string {
+	segs := strings.Split(dsName, "/")
+	for i := len(segs); i >= 2; i-- {
+		p := strings.Join(segs[:i], "/")
+		if m.marks[treeDsID(h, p)] {
+			return p
+		}
+	}
+	return ""
+}
+
+// toggleMark flips selection on a dataset, snapshot, or whole family.
 func (m *Model) toggleMark(r treeRow) bool {
-	if r.kind != rSnap && r.kind != rFam {
-		return false
-	}
-	if m.markOwner != r.parentID {
-		m.marks = map[string]bool{}
-		m.markOwner = r.parentID
-	}
+	h := r.host
 	switch r.kind {
+	case rDataset:
+		if !dsMarkable(r) {
+			return false
+		}
+		id := r.id
+		switch {
+		case m.marks[id]:
+			delete(m.marks, id)
+		case m.coveringDs(h, parentPath(r.ds.Name)) != "":
+			m.splitAround(h, r.ds.Name, nil)
+		default:
+			m.absorbSubtree(h, r.ds.Name)
+			m.marks[id] = true
+		}
 	case rSnap:
-		if m.marks[r.snap.Snap] {
-			delete(m.marks, r.snap.Snap)
-		} else {
-			m.marks[r.snap.Snap] = true
+		sid := r.id
+		switch {
+		case m.marks[sid]:
+			delete(m.marks, sid)
+		case m.marks[treeDsID(h, r.ds.Name)+"@"] || m.coveringDs(h, r.ds.Name) != "":
+			m.splitAround(h, r.ds.Name+"@", map[string]bool{r.snap.Snap: true})
+		default:
+			m.marks[sid] = true
 		}
 	case rFam:
-		all := true
+		members := map[string]bool{}
 		for _, s := range r.fam.Snaps {
-			if !m.marks[s.Snap] {
-				all = false
-				break
+			members[s.Snap] = true
+		}
+		switch {
+		case m.marks[treeDsID(h, r.ds.Name)+"@"] || m.coveringDs(h, r.ds.Name) != "":
+			// covered family: deselecting it splits everything around it
+			m.splitAround(h, r.ds.Name+"@", members)
+		default:
+			all := true
+			for _, s := range r.fam.Snaps {
+				if !m.marks[treeDsID(h, r.ds.Name+"@"+s.Snap)] {
+					all = false
+					break
+				}
+			}
+			for _, s := range r.fam.Snaps {
+				id := treeDsID(h, r.ds.Name+"@"+s.Snap)
+				if all {
+					delete(m.marks, id)
+				} else {
+					m.marks[id] = true
+				}
 			}
 		}
-		for _, s := range r.fam.Snaps {
-			if all {
-				delete(m.marks, s.Snap)
-			} else {
-				m.marks[s.Snap] = true
-			}
-		}
+	default:
+		return false
 	}
 	m.markGen++
 	return true
+}
+
+// parentPath is the dataset path one level up ("" at the pool root).
+func parentPath(name string) string {
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		return name[:i]
+	}
+	return ""
+}
+
+// splitAround deselects one thing inside a covered subtree by decomposing
+// the covering mark level by level: at each dataset on the path the snaps
+// and the siblings off the path become manual marks; the covering
+// ancestor is unmarked; the excluded thing ends up unselected. exclude:
+// target "ds@" with a snap-name set excludes snapshots of ds; target a
+// dataset path with nil excludes that dataset itself.
+func (m *Model) splitAround(h *hostState, target string, exclSnaps map[string]bool) {
+	dsPath := strings.TrimSuffix(target, "@")
+	snapSplit := strings.HasSuffix(target, "@")
+
+	// the pseudo case: "all snaps of ds" resolving into all-but-excluded.
+	// A pseudo never coexists with a covering ancestor (marking one
+	// absorbs the other), so this is the whole story.
+	if snapSplit && m.marks[treeDsID(h, dsPath)+"@"] {
+		delete(m.marks, treeDsID(h, dsPath)+"@")
+		for _, s := range h.dsSnaps[dsPath] {
+			if !exclSnaps[s.Snap] {
+				m.marks[treeDsID(h, dsPath+"@"+s.Snap)] = true
+			}
+		}
+		return
+	}
+
+	bottom := dsPath
+	if !snapSplit {
+		bottom = parentPath(dsPath) // decompose down to the excluded ds's parent
+	}
+	anc := m.coveringDs(h, bottom+"/x") // covering of anything at/below bottom
+	if anc == "" {
+		return
+	}
+	delete(m.marks, treeDsID(h, anc))
+
+	tree := h.dsTrees[poolOf(anc)]
+	if tree == nil {
+		return // cannot decompose without the tree; marks drop honestly
+	}
+	// walk anc → bottom; at each level mark snaps and off-path children
+	level := anc
+	for {
+		d := tree.ByName[level]
+		if d == nil {
+			return
+		}
+		next := "" // the on-path child to descend into
+		if level != bottom {
+			rest := strings.TrimPrefix(bottom, level+"/")
+			next = level + "/" + strings.SplitN(rest, "/", 2)[0]
+		}
+		// this level's snapshots join the selection (unless this is the
+		// level whose snaps are being excluded)
+		if snapSplit && level == bottom {
+			for _, s := range h.dsSnaps[level] {
+				if !exclSnaps[s.Snap] {
+					m.marks[treeDsID(h, level+"@"+s.Snap)] = true
+				}
+			}
+		} else if snaps, ok := h.dsSnaps[level]; ok {
+			for _, s := range snaps {
+				m.marks[treeDsID(h, level+"@"+s.Snap)] = true
+			}
+		} else {
+			m.marks[treeDsID(h, level)+"@"] = true // list pending: pseudo
+		}
+		for _, k := range d.Children {
+			if k.Name != next && !(level == bottom && !snapSplit && k.Name == dsPath) {
+				m.marks[treeDsID(h, k.Name)] = true
+			}
+		}
+		if level == bottom {
+			return
+		}
+		level = next
+	}
+}
+
+// absorbSubtree removes every mark beneath a dataset about to be marked —
+// inheritance replaces them.
+func (m *Model) absorbSubtree(h *hostState, dsName string) {
+	pfx := treeDsID(h, dsName)
+	for id := range m.marks {
+		if strings.HasPrefix(id, pfx+"/") || strings.HasPrefix(id, pfx+"@") {
+			delete(m.marks, id)
+		}
+	}
 }
 
 func (m *Model) clearMarks() {
@@ -93,50 +235,129 @@ func (m *Model) clearMarks() {
 		m.marks = map[string]bool{}
 		m.markGen++
 	}
-	m.markOwner = ""
 }
 
-// famAllMarked reports whether every member of a family row is marked.
-func (m *Model) famAllMarked(r treeRow) bool {
-	if r.parentID != m.markOwner || len(m.marks) == 0 {
-		return false
-	}
-	for _, s := range r.fam.Snaps {
-		if !m.marks[s.Snap] {
-			return false
-		}
-	}
-	return true
+// markGroup is one dataset's worth of selection — the unit the math runs
+// on: a whole-dataset mark (worth its recursive `used`), or a snapshot
+// set (worth one grouped dry-run).
+type markGroup struct {
+	h      *hostState
+	ds     string
+	dsMark bool
+	snaps  []*zfs.Snapshot // chronological, resolved against the live list
+	pseudo bool            // all-snaps mark whose list has not loaded yet
+	loaded bool            // the snapshot list is in; empty snaps = truly 0
 }
 
-// markedSnaps returns the marked snapshots in chronological order,
-// intersected with the owner's current snapshot list.
-func (m *Model) markedSnaps() []*zfs.Snapshot {
-	h, ds := m.markHostDs()
-	if h == nil || len(m.marks) == 0 {
-		return nil
+// target is the grouped dry-run argument ("ds@a,b,c"), "" when not a
+// resolvable snapshot group.
+func (g markGroup) target() string {
+	if g.dsMark || g.pseudo || len(g.snaps) == 0 {
+		return ""
 	}
-	var out []*zfs.Snapshot
-	for _, s := range h.dsSnaps[ds] {
-		if m.marks[s.Snap] {
-			out = append(out, s)
+	names := make([]string, len(g.snaps))
+	for i, s := range g.snaps {
+		names[i] = s.Snap
+	}
+	return g.ds + "@" + strings.Join(names, ",")
+}
+
+// markGroups organizes the mark set, sorted by host then dataset.
+func (m *Model) markGroups() []markGroup {
+	type key struct {
+		host, ds string
+	}
+	byDs := map[key]*markGroup{}
+	var order []key
+	group := func(hName, ds string) *markGroup {
+		k := key{hName, ds}
+		if g, ok := byDs[k]; ok {
+			return g
 		}
+		g := &markGroup{h: m.hostByName(hName), ds: ds}
+		byDs[k] = g
+		order = append(order, k)
+		return g
+	}
+	for id := range m.marks {
+		i := strings.IndexByte(id, 0)
+		if i < 0 {
+			continue
+		}
+		hName, rest := id[:i], id[i+1:]
+		if j := strings.IndexByte(rest, '@'); j >= 0 {
+			g := group(hName, rest[:j])
+			if rest[j+1:] == "" {
+				g.pseudo = true // resolved below if the list is in
+			}
+		} else {
+			group(hName, rest).dsMark = true
+		}
+	}
+	for k, g := range byDs {
+		if g.dsMark || g.h == nil {
+			continue
+		}
+		snaps, loaded := g.h.dsSnaps[k.ds]
+		g.loaded = loaded
+		if g.pseudo && loaded {
+			g.pseudo, g.snaps = false, snaps
+			continue
+		}
+		if g.pseudo {
+			continue
+		}
+		for _, s := range snaps {
+			if m.marks[treeDsID(g.h, k.ds+"@"+s.Snap)] {
+				g.snaps = append(g.snaps, s)
+			}
+		}
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if order[i].host != order[j].host {
+			return order[i].host < order[j].host
+		}
+		return order[i].ds < order[j].ds
+	})
+	out := make([]markGroup, 0, len(order))
+	for _, k := range order {
+		out = append(out, *byDs[k])
 	}
 	return out
 }
 
-// MarkTarget builds the `zfs destroy -n` argument ("ds@a,b,c").
-func (m *Model) MarkTarget() string {
-	sel := m.markedSnaps()
-	if len(sel) == 0 {
-		return ""
+// dsUsed is a marked dataset's recursive footprint — exactly what
+// `destroy -r` would free — or -1 while unknown.
+func (g markGroup) dsUsed() int64 {
+	if g.h == nil {
+		return -1
 	}
-	_, ds := m.markHostDs()
-	names := make([]string, len(sel))
-	for i, s := range sel {
-		names[i] = s.Snap
+	tree := g.h.dsTrees[poolOf(g.ds)]
+	if tree == nil || tree.ByName[g.ds] == nil {
+		return -1
 	}
-	return ds + "@" + strings.Join(names, ",")
+	return tree.ByName[g.ds].Used
+}
+
+// inMarkContext reports whether the cursor row belongs to the selection's
+// world — a selected row, or any row of a dataset with marks in play.
+func (m *Model) inMarkContext(r treeRow) bool {
+	if len(m.marks) == 0 {
+		return false
+	}
+	if r.sel {
+		return true
+	}
+	if r.ds == nil || r.host == nil {
+		return false
+	}
+	pfx := treeDsID(r.host, r.ds.Name)
+	for id := range m.marks {
+		if id == pfx || strings.HasPrefix(id, pfx+"@") || strings.HasPrefix(id, pfx+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // famTarget builds the dry-run target for a whole family.
@@ -427,20 +648,39 @@ func (m *Model) ShowSnaps(host, path string) bool {
 	return true
 }
 
-// MarkSnaps selects snapshots on a dataset (dump helper).
+// MarkSnaps marks snapshots on a dataset (dump helper).
 func (m *Model) MarkSnaps(host, ds string, names []string) {
 	h := m.hostByName(host)
 	if h == nil {
 		return
 	}
-	m.markOwner = treeDsID(h, ds)
 	for _, n := range names {
 		n = strings.TrimSpace(strings.TrimPrefix(n, "@"))
 		if n != "" {
-			m.marks[n] = true
+			m.marks[treeDsID(h, ds+"@"+n)] = true
 		}
 	}
 	m.markGen++
+}
+
+// MarkDataset marks a whole dataset (dump helper).
+func (m *Model) MarkDataset(host, ds string) {
+	if h := m.hostByName(host); h != nil {
+		m.marks[treeDsID(h, ds)] = true
+		m.markGen++
+	}
+}
+
+// MarkTargets lists the grouped dry-run targets as (host, target) pairs
+// (dump helper — the pipeline runs them synchronously).
+func (m *Model) MarkTargets() [][2]string {
+	var out [][2]string
+	for _, g := range m.markGroups() {
+		if t := g.target(); t != "" && g.h != nil {
+			out = append(out, [2]string{g.h.name, t})
+		}
+	}
+	return out
 }
 
 // SetCursorRow moves the tree cursor to the first visible row matching by

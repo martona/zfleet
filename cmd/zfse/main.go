@@ -36,7 +36,8 @@ func main() {
 	snapsFlag := flag.String("snaps", "", "comma-separated [host:]datasets whose snapshots to unfold into the tree for --dump (the t toggle); ds@label also unfolds that family")
 	cursor := flag.String("cursor", "", "visible row to move the --dump cursor to: @snap, @family label, dataset, pool, or host")
 	expand := flag.String("expand", "", "comma-separated [host:]pools/datasets to unfold for --dump tree views")
-	mark := flag.String("mark", "", "comma-separated snapshot names to mark within the single --snaps dataset (dump)")
+	var markFlags multiFlag
+	flag.Var(&markFlags, "mark", "selection to mark for --dump: [host:]ds@s1,s2 or a whole [host:]ds (repeatable)")
 	filterFlag := flag.String("filter", "", "filter pattern for --dump: ds[@snap], substring or glob; sweeps the fleet like the live / key")
 	vdrives := flag.Bool("vdrives", false, "show every drive's check ledger in --dump (the live v toggle)")
 	ackFile := flag.String("ack-file", "", "acknowledgement ledger `path` (default ~/.config/zfse/ack.conf)")
@@ -146,8 +147,6 @@ func main() {
 			}
 		}
 		if *snapsFlag != "" {
-			var lastHost, lastPath string
-			n := 0
 			for _, item := range strings.Split(*snapsFlag, ",") {
 				item = strings.TrimSpace(item)
 				if item == "" {
@@ -171,19 +170,28 @@ func main() {
 				if propText, err := src.PropTexts(ctx, ds); err == nil {
 					m.ApplyProps(host, ds, propText)
 				}
-				lastHost, lastPath = host, ds
-				n++
 			}
-			if *mark != "" {
-				if n != 1 {
-					fail("--mark needs exactly one --snaps dataset")
-				}
-				m.MarkSnaps(lastHost, lastPath, strings.Split(*mark, ","))
-				if target := m.MarkTarget(); target != "" {
-					text, err := srcOf(lastHost).DestroyDryRun(ctx, target)
-					m.ApplyDryRun(lastHost, target, text, err)
-				}
+		}
+		for _, mk := range markFlags {
+			host, path := hostFor(mk)
+			src := srcOf(host)
+			ds := strings.SplitN(path, "@", 2)[0]
+			pool := strings.SplitN(ds, "/", 2)[0]
+			if dsText, err := src.DatasetTexts(ctx, pool); err == nil {
+				m.ApplyDatasets(host, pool, dsText)
 			}
+			if i := strings.IndexByte(path, '@'); i >= 0 {
+				if snapText, err := src.SnapshotTexts(ctx, ds); err == nil {
+					m.ApplySnaps(host, ds, snapText)
+				}
+				m.MarkSnaps(host, ds, strings.Split(path[i+1:], ","))
+			} else {
+				m.MarkDataset(host, ds)
+			}
+		}
+		for _, ht := range m.MarkTargets() {
+			text, err := srcOf(ht[0]).DestroyDryRun(ctx, ht[1])
+			m.ApplyDryRun(ht[0], ht[1], text, err)
 		}
 		if *filterFlag != "" {
 			// the live sweep, run synchronously: every pool's dataset tree,

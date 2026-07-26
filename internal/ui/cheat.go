@@ -43,8 +43,8 @@ func (m *Model) cheatBase() []keyHint {
 			return []keyHint{{"", "type to filter…"}, {"enter", "keep"}, {"esc", "cancel"}}
 		}
 		row := m.treeSelected()
-		if len(m.marks) > 0 && (row.id == m.markOwner || row.parentID == m.markOwner) {
-			return []keyHint{{"space", "toggle"}, {"esc", "clear"}, {"q", "quit"}}
+		if m.inMarkContext(row) {
+			return []keyHint{{"space", "toggle"}, {"esc", "clear all"}, {"q", "quit"}}
 		}
 		if m.filter != "" {
 			head := []keyHint{{"esc", "clear filter"}}
@@ -86,6 +86,9 @@ func (m *Model) cheatBase() []keyHint {
 					label = "hide snaps"
 				}
 				head = append(head, keyHint{"t", label})
+			}
+			if dsMarkable(row) {
+				head = append(head, keyHint{"space", "select"})
 			}
 		case rFam:
 			if row.expanded {

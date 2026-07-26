@@ -40,6 +40,7 @@ type treeRow struct {
 	snap       *zfs.Snapshot
 	member     bool // snapshot scattered from an unfolded family
 	hit        bool // filter views: a genuine match, not a structural ancestor
+	sel        bool // marked, directly or by inheritance from a marked ancestor
 	depth      int  // dataset rows: 1 = root dataset; snap rows: owner depth + 1
 	id         string
 	parentID   string
@@ -108,13 +109,14 @@ func (m *Model) treeRows() []treeRow {
 			if root == nil {
 				continue
 			}
-			var walk func(d *zfs.Dataset, depth int, parent string)
-			walk = func(d *zfs.Dataset, depth int, parent string) {
+			var walk func(d *zfs.Dataset, depth int, parent string, cov bool)
+			walk = func(d *zfs.Dataset, depth int, parent string, cov bool) {
 				id := treeDsID(h, d.Name)
 				exp := m.expanded[id]
+				sel := cov || m.marks[id]
 				rows = append(rows, treeRow{
 					kind: rDataset, host: h, ds: d, depth: depth, id: id, parentID: parent,
-					expandable: len(d.Children) > 0 || m.snapsShown[id], expanded: exp,
+					expandable: len(d.Children) > 0 || m.snapsShown[id], expanded: exp, sel: sel,
 				})
 				if !exp {
 					return
@@ -124,7 +126,7 @@ func (m *Model) treeRows() []treeRow {
 				// descent into children
 				if m.snapsShown[id] {
 					if _, ok := h.dsSnaps[d.Name]; ok {
-						rows = append(rows, m.snapRows(h, d, depth+1, id)...)
+						rows = append(rows, m.snapRows(h, d, depth+1, id, sel)...)
 					} else {
 						rows = append(rows, treeRow{kind: rPending, host: h, ds: d,
 							depth: depth + 1, id: "w:" + id, parentID: id})
@@ -137,10 +139,10 @@ func (m *Model) treeRows() []treeRow {
 					sort.SliceStable(kids, func(i, j int) bool { return kids[i].Name < kids[j].Name })
 				}
 				for _, k := range kids {
-					walk(k, depth+1, id)
+					walk(k, depth+1, id, sel)
 				}
 			}
-			walk(root, 1, pid)
+			walk(root, 1, pid, false)
 		}
 	}
 	return rows
@@ -177,9 +179,10 @@ func (m *Model) filterRows() []treeRow {
 			if m.multiHost {
 				parent = treeHostID(h)
 			}
-			var walk func(d *zfs.Dataset, depth int, parentID string) []treeRow
-			walk = func(d *zfs.Dataset, depth int, parentID string) []treeRow {
+			var walk func(d *zfs.Dataset, depth int, parentID string, cov bool) []treeRow
+			walk = func(d *zfs.Dataset, depth int, parentID string, cov bool) []treeRow {
 				id := treeDsID(h, d.Name)
+				sel := cov || m.marks[id]
 				target := d.Base()
 				if dsByPath {
 					target = d.Name
@@ -202,21 +205,23 @@ func (m *Model) filterRows() []treeRow {
 				}
 				var kidRows []treeRow
 				for _, k := range kids {
-					kidRows = append(kidRows, walk(k, depth+1, id)...)
+					kidRows = append(kidRows, walk(k, depth+1, id, sel)...)
 				}
 				if !hit && len(kidRows) == 0 {
 					return nil
 				}
 				out := []treeRow{{kind: rDataset, host: h, ds: d, depth: depth,
-					id: id, parentID: parentID, hit: hit}}
+					id: id, parentID: parentID, hit: hit, sel: sel}}
+				snapCov := sel || m.marks[id+"@"]
 				for _, s := range snaps {
+					sid := treeDsID(h, d.Name+"@"+s.Snap)
 					out = append(out, treeRow{kind: rSnap, host: h, ds: d, snap: s,
-						hit: true, depth: depth + 1,
-						id: treeDsID(h, d.Name+"@"+s.Snap), parentID: id})
+						hit: true, depth: depth + 1, sel: snapCov || m.marks[sid],
+						id: sid, parentID: id})
 				}
 				return append(out, kidRows...)
 			}
-			dsRows := walk(root, 1, pid)
+			dsRows := walk(root, 1, pid, false)
 			if len(dsRows) == 0 {
 				continue
 			}
@@ -244,8 +249,10 @@ func (m *Model) filterHits(rows []treeRow) int {
 // snapRows builds a dataset's snapshot rows. Strictly chronological: a
 // family row sits at the slot its earliest member earned; unfolding it
 // scatters the members to their own chronological positions among the named
-// snapshots.
-func (m *Model) snapRows(h *hostState, d *zfs.Dataset, depth int, parent string) []treeRow {
+// snapshots. cov marks the whole set selected-by-inheritance.
+func (m *Model) snapRows(h *hostState, d *zfs.Dataset, depth int, parent string, cov bool) []treeRow {
+	cov = cov || m.marks[treeDsID(h, d.Name)+"@"] // the all-snaps pseudo
+	snapSel := func(id string) bool { return cov || m.marks[id] }
 	type cand struct {
 		t int64
 		r treeRow
@@ -255,23 +262,32 @@ func (m *Model) snapRows(h *hostState, d *zfs.Dataset, depth int, parent string)
 		if e.Fam != nil {
 			fid := treeFamID(h, d.Name, e.Fam.Label())
 			exp := m.expanded[fid]
+			all := true
+			for _, s := range e.Fam.Snaps {
+				if !snapSel(treeDsID(h, d.Name+"@"+s.Snap)) {
+					all = false
+					break
+				}
+			}
 			cands = append(cands, cand{e.Fam.Oldest().Creation, treeRow{
 				kind: rFam, host: h, ds: d, fam: e.Fam, depth: depth,
-				id: fid, parentID: parent, expandable: true, expanded: exp,
+				id: fid, parentID: parent, expandable: true, expanded: exp, sel: all,
 			}})
 			if !exp {
 				continue
 			}
 			for _, s := range e.Fam.Snaps {
+				id := treeDsID(h, d.Name+"@"+s.Snap)
 				cands = append(cands, cand{s.Creation, treeRow{
 					kind: rSnap, host: h, ds: d, snap: s, member: true, depth: depth,
-					id: treeDsID(h, d.Name+"@"+s.Snap), parentID: parent,
+					id: id, parentID: parent, sel: snapSel(id),
 				}})
 			}
 		} else {
+			id := treeDsID(h, d.Name+"@"+e.Snap.Snap)
 			cands = append(cands, cand{e.Snap.Creation, treeRow{
 				kind: rSnap, host: h, ds: d, snap: e.Snap, depth: depth,
-				id: treeDsID(h, d.Name+"@"+e.Snap.Snap), parentID: parent,
+				id: id, parentID: parent, sel: snapSel(id),
 			}})
 		}
 	}
@@ -361,9 +377,8 @@ func (m *Model) toggleSnapsShown() (tea.Cmd, bool) {
 		if row.kind != rDataset {
 			m.treeSel = id // the row under the cursor just vanished
 		}
-		if m.markOwner == id {
-			m.clearMarks()
-		}
+		// marks survive the fold — the selection is fleet state, not view
+		// state; the collection panel keeps accounting for them
 		return nil, true
 	}
 	if s, ok := h.dsSnaps[ds.Name]; ok && len(s) == 0 {
