@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -142,38 +143,43 @@ func frame(m *Model) string {
 	var rightTitle string
 	var right []string
 	left := treeNarrowPane(m, leftW, contentH)
-	switch row.kind {
-	case rHost:
-		rightTitle = row.host.name
-		right = hostInspector(m, row.host, rightW)
-	case rPool:
-		rightTitle = row.pool.Name
-		right = inspector(m, row.host, row.pool, rightW)
-	case rDataset:
-		rightTitle = row.ds.Base()
-		right = dsInspector(m, row.host, row.ds, rightW)
-	case rFam:
-		rightTitle = "@" + row.fam.Label()
-		right = famInspector(m, row.host, row.ds.Name, row.fam, rightW)
-	case rSnap:
-		rightTitle = "@" + row.snap.Snap
-		right = snapInspector(m, row.snap)
-	case rPending:
-		// the wait row answers with its parent's inspector — the data you
-		// already have, while the rest arrives
-		if row.pool != nil {
+	// settle-hold: while the cursor is in flight the panel stays blank —
+	// no point paying for an inspector that the very next buffered key
+	// replaces. It populates the instant the cursor has been still.
+	if time.Since(m.cursorMovedAt) >= settleDelay {
+		switch row.kind {
+		case rHost:
+			rightTitle = row.host.name
+			right = hostInspector(m, row.host, rightW)
+		case rPool:
 			rightTitle = row.pool.Name
 			right = inspector(m, row.host, row.pool, rightW)
-		} else if row.ds != nil {
+		case rDataset:
 			rightTitle = row.ds.Base()
 			right = dsInspector(m, row.host, row.ds, rightW)
+		case rFam:
+			rightTitle = "@" + row.fam.Label()
+			right = famInspector(m, row.host, row.ds.Name, row.fam, rightW)
+		case rSnap:
+			rightTitle = "@" + row.snap.Snap
+			right = snapInspector(m, row.snap)
+		case rPending:
+			// the wait row answers with its parent's inspector — the data
+			// you already have, while the rest arrives
+			if row.pool != nil {
+				rightTitle = row.pool.Name
+				right = inspector(m, row.host, row.pool, rightW)
+			} else if row.ds != nil {
+				rightTitle = row.ds.Base()
+				right = dsInspector(m, row.host, row.ds, rightW)
+			}
 		}
-	}
-	// while the cursor stays in the selection's world, the panel answers
-	// for the collection as a whole
-	if m.inMarkContext(row) {
-		rightTitle = fmt.Sprintf("selection (%d)", len(m.marks))
-		right = selInspector(m, rightW, m.panelScroll, contentH)
+		// while the cursor stays in the selection's world, the panel
+		// answers for the collection as a whole
+		if m.inMarkContext(row) {
+			rightTitle = fmt.Sprintf("selection (%d)", len(m.marks))
+			right = selInspector(m, rightW, m.panelScroll, contentH)
+		}
 	}
 	right, m.panelScroll, m.rightOverflow = scrollWindow(right, m.panelScroll, contentH)
 

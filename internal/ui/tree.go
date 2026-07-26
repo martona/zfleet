@@ -3,6 +3,7 @@ package ui
 import (
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -348,6 +349,9 @@ func (m *Model) treeMove(delta int) {
 	if i > len(rows)-1 {
 		i = len(rows) - 1
 	}
+	if rows[i].id != m.treeSel {
+		m.cursorMovedAt = time.Now() // panel goes on settle-hold
+	}
 	m.treeSel = rows[i].id
 	if rows[i].kind == rPool {
 		m.setSel(rows[i].host, rows[i].pool.Name) // resets the pool inspector's elastic widths
@@ -468,9 +472,11 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.panelScroll--
 	case "g":
 		m.treeSel = overviewID
+		m.cursorMovedAt = time.Now()
 	case "G":
 		if rows := m.treeRows(); len(rows) > 0 {
 			m.treeSel = rows[len(rows)-1].id
+			m.cursorMovedAt = time.Now()
 		}
 	case "right", "l", "enter":
 		if m.filter != "" {

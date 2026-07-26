@@ -284,8 +284,20 @@ func (g markGroup) target() string {
 	return g.ds + "@" + strings.Join(names, ",")
 }
 
-// markGroups organizes the mark set, sorted by host then dataset.
+// markGroups serves the grouped selection from cache — the Σ math and the
+// inventory read it every frame, and at thousands of marks the grouping
+// itself is frame budget. Rebuilds on mark changes (gen) or data changes
+// (dirtyData).
 func (m *Model) markGroups() []markGroup {
+	if m.groupsOK && m.groupsGen == m.markGen {
+		return m.groupsCache
+	}
+	m.groupsCache = m.buildMarkGroups()
+	m.groupsOK, m.groupsGen = true, m.markGen
+	return m.groupsCache
+}
+
+func (m *Model) buildMarkGroups() []markGroup {
 	type key struct {
 		host, ds string
 	}

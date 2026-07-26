@@ -72,15 +72,32 @@ type Model struct {
 	panelKey      string
 	rightOverflow bool
 
-	// per-cycle row cache: one frame's worth of tree walking instead of
-	// eight. Invalidated at the top of every Update and after key dispatch.
-	rowsCache []treeRow
-	rowsOK    bool
+	// derived-data caches. Rows rebuild when fleet data or keys change —
+	// NOT on dry-run arrivals, which come hundreds to a burst after a big
+	// selection and never move a row. Groups rebuild on mark or snapshot
+	// changes.
+	rowsCache   []treeRow
+	rowsOK      bool
+	groupsCache []markGroup
+	groupsOK    bool
+	groupsGen   int
 
 	// flood guard: consecutive spaces on an unmoved cursor count once —
 	// held-space races must not flip the last row by buffer parity
 	lastSpace string
+
+	// settle-hold: the right panel stays blank while the cursor is in
+	// flight and populates once it has been still for a beat
+	cursorMovedAt time.Time
 }
+
+const settleDelay = 100 * time.Millisecond
+
+// dirtyData invalidates the derived caches — called only from handlers
+// whose payload can actually change rows or groups.
+func (m *Model) dirtyData() { m.rowsOK, m.groupsOK = false, false }
+
+type settleMsg struct{}
 
 func New(specs []HostSpec, multiHost bool) *Model {
 	m := &Model{
@@ -382,8 +399,10 @@ func (m *Model) SetSelected(host, name string) {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	m.rowsOK = false // any message may have changed what the tree shows
 	switch msg := msg.(type) {
+
+	case settleMsg:
+		return m, nil // repaint only: the cursor settled, panels may build
 
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
@@ -401,6 +420,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.lastErr = nil
 			m.ApplyPoolData(msg.host, msg.pools)
 			m.ApplyAuxPools(msg.host, msg.rootsText, msg.propsText)
+			m.dirtyData()
 		}
 		return m, nil
 
@@ -489,6 +509,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.lastErr = msg.err
 		} else {
 			h.dsTrees[msg.pool] = zfs.ParseDatasets(msg.text)
+			m.dirtyData()
 		}
 		return m, m.treeEnsure()
 
@@ -497,6 +518,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			delete(h.dsSnapsPend, msg.ds)
 			if msg.err == nil {
 				m.ApplySnaps(msg.host, msg.ds, msg.text)
+				m.dirtyData()
 				if len(m.marks) > 0 {
 					// a pseudo-mark may just have become resolvable
 					return m, m.markDebounce()
@@ -579,6 +601,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h := m.hostByName(msg.host); h != nil {
 			if msg.err == nil {
 				m.ApplySweep(msg.host, msg.pool, msg.text)
+				m.dirtyData()
 			} else {
 				// stamp the TTL anyway so a failing pool is not hammered on
 				// every keystroke
@@ -600,10 +623,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Tick(perfInterval, func(time.Time) tea.Msg { return perfTickMsg{} }))
 
 	case tea.KeyMsg:
+		before := m.cursorMovedAt
 		mdl, cmd := m.keyDispatch(msg)
 		// keys mutate marks/expansion/filter state mid-walk; the View that
 		// follows must rebuild from the final state
-		m.rowsOK = false
+		m.dirtyData()
+		if m.cursorMovedAt != before {
+			// the panel is on hold; wake the renderer once the cursor settles
+			cmd = tea.Batch(cmd, tea.Tick(settleDelay+20*time.Millisecond,
+				func(time.Time) tea.Msg { return settleMsg{} }))
+		}
 		return mdl, cmd
 	}
 	return m, nil
