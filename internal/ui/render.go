@@ -346,16 +346,13 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 					if s.WriteBytes >= 0 {
 						written = zfs.NiceBytes(s.WriteBytes)
 					}
-					switch ds := smartSev(s); {
-					case ds == sevErr:
-						parts = append(parts, "smart FAIL")
+					// just the tier — the factfinding is phase 3's drill
+					switch smartSev(s) {
+					case sevErr:
+						parts = append(parts, "FAIL")
 						sev = sevErr
-					case ds == sevWarn:
-						txt := strings.Join(s.Warns, " · ")
-						if len(txt) > 30 {
-							txt = "smart WARN"
-						}
-						parts = append(parts, txt)
+					case sevWarn:
+						parts = append(parts, "WARN")
 						if sev < sevWarn {
 							sev = sevWarn
 						}
