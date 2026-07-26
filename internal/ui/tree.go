@@ -342,7 +342,8 @@ func (m *Model) treeMove(delta int) {
 	if len(rows) == 0 {
 		return
 	}
-	i := m.treeIdx(rows) + delta
+	cur := m.treeIdx(rows)
+	i := cur + delta
 	if i < 0 {
 		i = 0
 	}
@@ -350,7 +351,12 @@ func (m *Model) treeMove(delta int) {
 		i = len(rows) - 1
 	}
 	if rows[i].id != m.treeSel {
-		m.cursorMovedAt = time.Now() // panel goes on settle-hold
+		// settle-hold — but a hop that stays inside the selection's world
+		// keeps the very same collection panel on screen, and blanking an
+		// unchanged panel is pure flicker
+		if !(m.inMarkContext(rows[cur]) && m.inMarkContext(rows[i])) {
+			m.cursorMovedAt = time.Now()
+		}
 	}
 	m.treeSel = rows[i].id
 	if rows[i].kind == rPool {
