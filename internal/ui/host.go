@@ -119,6 +119,11 @@ type hostState struct {
 	// severity math here can consult it
 	acks map[string]string
 
+	// dry-run concurrency gate: a big selection fans out one dry-run per
+	// group, and an unbounded stampede blows sshd's MaxSessions (~10) on
+	// the ControlMaster mux — exit 255s that never reached zfs
+	dryGate chan struct{}
+
 	// grow-only readout widths; ioW is per-pool (reset on selection
 	// change), stripW lives for the session
 	ioW    map[string]int
@@ -146,6 +151,7 @@ func newHostState(name, dest string, src collect.Source) *hostState {
 		dryCache:      map[string]*dryResult{},
 		snapSweepAt:   map[string]time.Time{},
 		snapSweepPend: map[string]bool{},
+		dryGate:       make(chan struct{}, 4),
 		ioW:           map[string]int{},
 		stripW:        map[string]int{},
 	}

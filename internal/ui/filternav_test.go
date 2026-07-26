@@ -16,7 +16,7 @@ func TestFilterNavigation(t *testing.T) {
 	m, h := marksFixture()
 	h.pools = []*zfs.Pool{{Name: "p"}}
 	m.treeSel = overviewID
-	press := func(msg tea.KeyMsg) { m.treeKeys(msg) }
+	press := func(msg tea.KeyMsg) { m.rowsOK = false; m.treeKeys(msg); m.rowsOK = false }
 
 	// arrows straight out of input mode: filter survives, cursor moves
 	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
@@ -59,7 +59,7 @@ func TestFilterNavigation(t *testing.T) {
 func TestFilterSpaceSemantics(t *testing.T) {
 	m, h := marksFixture()
 	h.pools = []*zfs.Pool{{Name: "p"}}
-	press := func(msg tea.KeyMsg) { m.treeKeys(msg) }
+	press := func(msg tea.KeyMsg) { m.rowsOK = false; m.treeKeys(msg); m.rowsOK = false }
 	space := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")}
 
 	// @-hunt: the dataset row skips (cursor still moves), the snap marks
@@ -92,5 +92,37 @@ func TestFilterSpaceSemantics(t *testing.T) {
 	press(space)
 	if !m.marks[treeDsID(h, "p/a/b")] {
 		t.Fatalf("name-hunt hit ds did not mark whole: %v", m.marks)
+	}
+}
+
+// Held space at the end of a list must not flip the last row by buffer
+// parity: consecutive spaces on an unmoved cursor count once; any other
+// key re-arms the guard.
+func TestSpaceFloodGuard(t *testing.T) {
+	m, h := marksFixture()
+	h.pools = []*zfs.Pool{{Name: "p"}}
+	press := func(msg tea.KeyMsg) { m.rowsOK = false; m.treeKeys(msg); m.rowsOK = false }
+	space := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")}
+
+	m.filter = "@s"
+	rows := m.treeRows()
+	last := rows[len(rows)-1]
+	if last.kind != rSnap {
+		t.Fatalf("fixture: last filter row is kind %d, want a snap", last.kind)
+	}
+	m.treeSel = last.id
+	press(space)
+	if !m.marks[last.id] {
+		t.Fatal("first space did not mark the last row")
+	}
+	press(space)
+	press(space)
+	if !m.marks[last.id] {
+		t.Fatal("buffered spaces flipped the last row by parity")
+	}
+	press(tea.KeyMsg{Type: tea.KeyDown}) // re-arms the guard
+	press(space)
+	if m.marks[last.id] {
+		t.Fatal("deliberate re-toggle after another key did not unmark")
 	}
 }

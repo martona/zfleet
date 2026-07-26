@@ -71,6 +71,15 @@ type Model struct {
 	panelScroll   int
 	panelKey      string
 	rightOverflow bool
+
+	// per-cycle row cache: one frame's worth of tree walking instead of
+	// eight. Invalidated at the top of every Update and after key dispatch.
+	rowsCache []treeRow
+	rowsOK    bool
+
+	// flood guard: consecutive spaces on an unmoved cursor count once —
+	// held-space races must not flip the last row by buffer parity
+	lastSpace string
 }
 
 func New(specs []HostSpec, multiHost bool) *Model {
@@ -373,6 +382,7 @@ func (m *Model) SetSelected(host, name string) {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.rowsOK = false // any message may have changed what the tree shows
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -540,27 +550,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.filter != "" {
 			cmds = append(cmds, m.ensureFilterCmd())
 		}
+		// a live selection keeps its math honest: never-fired and errored
+		// dry-runs get another chance at tick cadence
+		if len(m.marks) > 0 {
+			cmds = append(cmds, m.markEnsureCmds()...)
+		}
 		return m, tea.Batch(cmds...)
 
 	case dryTickMsg:
 		if msg.gen != m.markGen || len(m.marks) == 0 {
 			return m, nil
 		}
-		// fan the honest arithmetic out: one grouped dry-run per snapshot
-		// group, a snapshot-list fetch for any unresolved pseudo
-		var cmds []tea.Cmd
-		for _, g := range m.markGroups() {
-			switch {
-			case g.dsMark || g.h == nil:
-			case g.pseudo:
-				cmds = append(cmds, m.ensureSnapsCmd(g.h, g.ds))
-			default:
-				if t := g.target(); t != "" {
-					cmds = append(cmds, m.ensureDryCmd(g.h, t))
-				}
-			}
-		}
-		return m, tea.Batch(cmds...)
+		return m, tea.Batch(m.markEnsureCmds()...)
 
 	case dryRunMsg:
 		if h := m.hostByName(msg.host); h != nil {
@@ -599,24 +600,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Tick(perfInterval, func(time.Time) tea.Msg { return perfTickMsg{} }))
 
 	case tea.KeyMsg:
-		if m.ackPop {
-			if s := msg.String(); s == "q" || s == "ctrl+c" {
-				return m, tea.Quit
-			}
-			m.ackKeys(msg.String())
-			return m, nil
-		}
-		switch m.mode {
-		case modePerf:
-			return m.perfKeys(msg)
-		default:
-			if msg.String() == "p" && !m.filterIn {
-				return m, m.enterPerf()
-			}
-			return m.treeKeys(msg)
-		}
+		mdl, cmd := m.keyDispatch(msg)
+		// keys mutate marks/expansion/filter state mid-walk; the View that
+		// follows must rebuild from the final state
+		m.rowsOK = false
+		return mdl, cmd
 	}
 	return m, nil
+}
+
+func (m *Model) keyDispatch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.ackPop {
+		if s := msg.String(); s == "q" || s == "ctrl+c" {
+			return m, tea.Quit
+		}
+		m.ackKeys(msg.String())
+		return m, nil
+	}
+	switch m.mode {
+	case modePerf:
+		return m.perfKeys(msg)
+	default:
+		if msg.String() == "p" && !m.filterIn {
+			return m, m.enterPerf()
+		}
+		return m.treeKeys(msg)
+	}
 }
 
 // ApplyDryRun stores a dry-run result for a target (dump helper).

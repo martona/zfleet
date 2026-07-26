@@ -34,7 +34,9 @@ func poolOf(name string) string {
 
 // dryResult caches one `zfs destroy -nv` output, keyed by its exact target
 // string — a changed selection or snapshot set is a different key, so the
-// cache self-invalidates.
+// cache self-invalidates. Errors cache like answers, because they are:
+// zfs failures are deterministic (clones, permissions, vanished snaps) —
+// re-asking gets the same reply (Marton's ruling).
 type dryResult struct {
 	text    string
 	errText string
@@ -514,6 +516,26 @@ func (m *Model) ensureDryCmd(h *hostState, target string) tea.Cmd {
 	return fetchDryRun(h, target)
 }
 
+// markEnsureCmds fans out whatever the selection's math still owes: one
+// grouped dry-run per snapshot set, a snapshot-list fetch for unresolved
+// pseudos. Fired on mark changes (debounced) and re-checked by the
+// datasets tick so failures and races self-heal.
+func (m *Model) markEnsureCmds() []tea.Cmd {
+	var cmds []tea.Cmd
+	for _, g := range m.markGroups() {
+		switch {
+		case g.dsMark || g.h == nil:
+		case g.pseudo:
+			cmds = append(cmds, m.ensureSnapsCmd(g.h, g.ds))
+		default:
+			if t := g.target(); t != "" {
+				cmds = append(cmds, m.ensureDryCmd(g.h, t))
+			}
+		}
+	}
+	return cmds
+}
+
 // messages and fetch commands
 
 type datasetsMsg struct {
@@ -561,8 +583,12 @@ func fetchSweep(h *hostState, pool string) tea.Cmd {
 }
 
 func fetchDryRun(h *hostState, target string) tea.Cmd {
-	host, src := h.name, h.src
+	host, src, gate := h.name, h.src, h.dryGate
 	return func() tea.Msg {
+		// queue politely: the mux dies at ~10 concurrent ssh sessions, and
+		// a fleet-wide selection can owe dozens of dry-runs at once
+		gate <- struct{}{}
+		defer func() { <-gate }()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		text, err := src.DestroyDryRun(ctx, target)

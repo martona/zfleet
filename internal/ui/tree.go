@@ -75,7 +75,18 @@ func splitPoolID(m *Model, id string) (*hostState, string, bool) {
 	return h, rest[i+1:], true
 }
 
+// treeRows serves the current row list from the per-cycle cache — frame
+// composition asks for it many times per keypress, and on a big fleet the
+// walk is the whole cost of a key.
 func (m *Model) treeRows() []treeRow {
+	if !m.rowsOK {
+		m.rowsCache = m.buildRows()
+		m.rowsOK = true
+	}
+	return m.rowsCache
+}
+
+func (m *Model) buildRows() []treeRow {
 	if m.filter != "" {
 		return m.filterRows()
 	}
@@ -422,6 +433,12 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.ensureFilterCmd()
 	}
 
+	// any key that is not a select re-arms the flood guard: deliberate
+	// re-toggling always has a movement or other key between the spaces
+	if s := msg.String(); s != " " && s != "shift+down" && s != "shift+up" {
+		m.lastSpace = ""
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -472,20 +489,30 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case " ", "shift+down":
-		if m.filter != "" && !m.filterMarkable(m.treeSelected()) {
+		row := m.treeSelected()
+		if row.id == m.lastSpace {
+			break // buffered flood on an unmoved cursor: one toggle counted
+		}
+		if m.filter != "" && !m.filterMarkable(row) {
 			m.treeMove(1) // chrome, not a match: skip, keep the streak flowing
 			break
 		}
-		if m.toggleMark(m.treeSelected()) {
+		if m.toggleMark(row) {
+			m.lastSpace = row.id
 			m.treeMove(1)
 			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
 		}
 	case "shift+up":
-		if m.filter != "" && !m.filterMarkable(m.treeSelected()) {
+		row := m.treeSelected()
+		if row.id == m.lastSpace {
+			break
+		}
+		if m.filter != "" && !m.filterMarkable(row) {
 			m.treeMove(-1)
 			break
 		}
-		if m.toggleMark(m.treeSelected()) {
+		if m.toggleMark(row) {
+			m.lastSpace = row.id
 			m.treeMove(-1)
 			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
 		}

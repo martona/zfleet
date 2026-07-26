@@ -134,10 +134,10 @@ func selInspector(m *Model, w int) []string {
 	}
 	lines := []string{head, ""}
 
-	// Σ: exact components only; anything still computing is counted, not
-	// guessed
+	// Σ: exact components only; the rest is either still computing
+	// (transient) or failed (terminal — and named below in the inventory)
 	var sum int64
-	pending := 0
+	computing, failed := 0, 0
 	value := func(g markGroup) (int64, bool) {
 		switch {
 		case g.dsMark:
@@ -153,17 +153,40 @@ func selInspector(m *Model, w int) []string {
 			return dryReclaim(g.h.dryCache[g.target()])
 		}
 	}
+	groupErr := func(g markGroup) string {
+		if g.dsMark || g.pseudo || g.h == nil || len(g.snaps) == 0 {
+			return ""
+		}
+		r := g.h.dryCache[g.target()]
+		switch {
+		case r == nil || r.pending:
+			return ""
+		case r.errText != "":
+			return strings.SplitN(r.errText, "\n", 2)[0]
+		}
+		if _, ok := dryReclaim(r); !ok {
+			return "unparseable dry-run output"
+		}
+		return ""
+	}
 	for _, g := range groups {
 		if n, ok := value(g); ok {
 			sum += n
+		} else if groupErr(g) != "" {
+			failed++
 		} else {
-			pending++
+			computing++
 		}
 	}
 	sigma := " " + styBold.Render("Σ would free ") + styGood.Render(zfs.NiceBytes(sum))
-	if pending > 0 {
-		sigma = " " + styBold.Render("Σ would free ≥ ") + zfs.NiceBytes(sum) +
-			styDim.Render(fmt.Sprintf(" · %d unresolved", pending))
+	if computing+failed > 0 {
+		sigma = " " + styBold.Render("Σ would free ≥ ") + zfs.NiceBytes(sum)
+		if computing > 0 {
+			sigma += styDim.Render(fmt.Sprintf(" · %d computing…", computing))
+		}
+		if failed > 0 {
+			sigma += styBad.Render(fmt.Sprintf(" · %d failed", failed))
+		}
 	}
 	lines = append(lines, sigma, "")
 
@@ -199,6 +222,12 @@ func selInspector(m *Model, w int) []string {
 			}
 			if len(g.snaps) == 0 && g.loaded {
 				lines = append(lines, " "+styDim.Render(truncate(qualify(g)+"@ (marks outlived their snapshots)", nameW+8)))
+			}
+			// a failed group names its reason right under its lines — a
+			// diagnostic annotation, not a selection
+			if e := groupErr(g); e != "" {
+				lines = append(lines, "   └ "+styBad.Render("dry-run failed: ")+
+					styDim.Render(truncate(e, w-24)))
 			}
 		}
 	}
