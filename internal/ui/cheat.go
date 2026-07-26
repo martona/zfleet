@@ -40,7 +40,8 @@ func (m *Model) cheatBase() []keyHint {
 
 	default: // tree screen
 		if m.filterIn {
-			return []keyHint{{"", "type to filter…"}, {"enter", "keep"}, {"esc", "cancel"}}
+			return []keyHint{{"", "type to filter…"}, {"↓", "results"},
+				{"enter", "keep"}, {"esc", "cancel"}}
 		}
 		row := m.treeSelected()
 		if m.inMarkContext(row) {
@@ -48,7 +49,7 @@ func (m *Model) cheatBase() []keyHint {
 		}
 		if m.filter != "" {
 			head := []keyHint{{"esc", "clear filter"}}
-			if row.kind == rSnap {
+			if m.filterMarkable(row) {
 				head = append(head, keyHint{"space", "select"})
 			}
 			return append(head, keyHint{"/", "filter"}, keyHint{"s", "sort"},

@@ -60,6 +60,22 @@ func dsMarkable(r treeRow) bool {
 	return r.kind == rDataset && r.depth > 1
 }
 
+// filterMarkable: while filtering, space addresses only what the pattern
+// matched — snap rows in @-hunts, hit dataset rows in name hunts. A
+// dataset row in an @-hunt is a container heading, not a match; space
+// skips over it (the streak flows through), and whole-dataset marking
+// waits in the real tree, one esc away.
+func (m *Model) filterMarkable(r treeRow) bool {
+	_, _, hasSnap := splitFilter(m.filter)
+	switch r.kind {
+	case rSnap:
+		return true
+	case rDataset:
+		return !hasSnap && r.hit && dsMarkable(r)
+	}
+	return false
+}
+
 // coveringDs returns the marked dataset at or above dsName ("" when
 // uncovered). The invariant allows at most one; pool roots are never
 // markable, so two segments is as high as the scan goes.

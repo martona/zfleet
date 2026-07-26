@@ -128,7 +128,7 @@ func selInspector(m *Model, w int) []string {
 			hosts[g.h.name] = true
 		}
 	}
-	head := fmt.Sprintf(" %d marked · %d groups", len(m.marks), len(groups))
+	head := fmt.Sprintf(" %d marked", len(m.marks))
 	if m.multiHost {
 		head += fmt.Sprintf(" · %d hosts", len(hosts))
 	}
@@ -167,56 +167,40 @@ func selInspector(m *Model, w int) []string {
 	}
 	lines = append(lines, sigma, "")
 
+	// the inventory: one line per SELECTED object, full name, nothing
+	// else — a dataset path appears only when the dataset itself is
+	// marked. The grouped dry-runs stay underneath; only Σ speaks for
+	// them, per-line values are each snap's own used (context, dim).
 	qualify := func(g markGroup) string {
 		if m.multiHost && g.h != nil {
 			return g.h.name + ":" + g.ds
 		}
 		return g.ds
 	}
-	nameW := 12
-	for _, g := range groups {
-		if n := len(qualify(g)); n > nameW {
-			nameW = n
-		}
-	}
-	if max := w - 27; nameW > max {
-		nameW = max
+	nameW := w - 13
+	if nameW < 16 {
+		nameW = 16
 	}
 	for _, g := range groups {
-		kind := "dataset -r"
 		switch {
+		case g.dsMark:
+			val := "…"
+			if n, ok := value(g); ok {
+				val = zfs.NiceBytes(n)
+			}
+			lines = append(lines, " "+padR(truncate(qualify(g)+" ", nameW-11), nameW-11)+
+				styWarn.Render(padR("dataset -r", 11))+dimUnit(padL(val, 8)))
 		case g.pseudo:
-			kind = "all snaps"
-		case !g.dsMark && len(g.snaps) == 1:
-			kind = "1 snap"
-		case !g.dsMark:
-			kind = fmt.Sprintf("%d snaps", len(g.snaps))
-		}
-		val := styDim.Render(padL("…", 9))
-		if n, ok := value(g); ok {
-			if g.dsMark {
-				val = dimUnit(padL(zfs.NiceBytes(n), 9))
-			} else {
-				val = styGood.Render(padL(zfs.NiceBytes(n), 9))
+			lines = append(lines, " "+styDim.Render(padR(truncate(qualify(g)+"@ (resolving…)", nameW), nameW)))
+		default:
+			for _, s := range g.snaps {
+				lines = append(lines, " "+padR(truncate(qualify(g)+"@"+s.Snap, nameW), nameW)+
+					dimUnit(padL(zfs.NiceBytes(s.Used), 8)))
 			}
-		} else if !g.dsMark && !g.pseudo && g.h != nil {
-			if r := g.h.dryCache[g.target()]; r != nil && r.errText != "" {
-				val = styDim.Render(padL("n/a", 9)) // dry-run failed; Σ stays honest
+			if len(g.snaps) == 0 && g.loaded {
+				lines = append(lines, " "+styDim.Render(truncate(qualify(g)+"@ (marks outlived their snapshots)", nameW+8)))
 			}
 		}
-		lines = append(lines, " "+padR(truncate(qualify(g), nameW), nameW)+" "+
-			styDim.Render(padR(kind, 11))+val)
-	}
-
-	// a single snapshot group keeps the old intimacy: its member ledger
-	if len(groups) == 1 && !groups[0].dsMark && !groups[0].pseudo {
-		show := groups[0].snaps
-		lines = append(lines, "")
-		if len(show) > 12 {
-			lines = append(lines, " "+styDim.Render(fmt.Sprintf("… %d more", len(show)-12)))
-			show = show[len(show)-12:]
-		}
-		lines = append(lines, snapTable(show, w)...)
 	}
 	lines = append(lines, "",
 		" "+keyChip("space", "toggle")+styDim.Render(" · ")+keyChip("esc", "clear all"))

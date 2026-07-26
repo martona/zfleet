@@ -396,10 +396,21 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filter, m.filterIn = "", false
 		case "enter":
 			m.filterIn = false
+		case "down", "up":
+			// the bar is modeless: arrows leave it standing and walk the
+			// results it is already showing
+			m.filterIn = false
+			if msg.String() == "down" {
+				m.treeMove(1)
+			} else {
+				m.treeMove(-1)
+			}
+			return m, tea.Batch(m.ensureFilterCmd(), m.treeEnsure())
+		case "backspace":
 			if m.filter == "" {
+				m.filterIn = false // an empty bar backspaces itself away
 				break
 			}
-		case "backspace":
 			if r := []rune(m.filter); len(r) > 0 {
 				m.filter = string(r[:len(r)-1])
 			}
@@ -461,11 +472,19 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case " ", "shift+down":
+		if m.filter != "" && !m.filterMarkable(m.treeSelected()) {
+			m.treeMove(1) // chrome, not a match: skip, keep the streak flowing
+			break
+		}
 		if m.toggleMark(m.treeSelected()) {
 			m.treeMove(1)
 			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
 		}
 	case "shift+up":
+		if m.filter != "" && !m.filterMarkable(m.treeSelected()) {
+			m.treeMove(-1)
+			break
+		}
 		if m.toggleMark(m.treeSelected()) {
 			m.treeMove(-1)
 			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
