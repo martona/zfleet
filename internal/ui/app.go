@@ -48,6 +48,9 @@ type Model struct {
 	filter   string
 	filterIn bool // input mode — keystrokes edit the pattern
 
+	// v: drive check ledgers for ALL drives, not just warned ones
+	verboseDrives bool
+
 	perf    perfState
 	perfMem map[string]string // per-host remembered perf pool
 
@@ -325,6 +328,9 @@ const dsIOHistLen = 64
 
 // SetSize sets the frame size directly (used by --dump).
 func (m *Model) SetSize(w, h int) { m.w, m.h = w, h }
+
+// SetVerboseDrives forces the all-drives check ledgers on (used by --dump).
+func (m *Model) SetVerboseDrives(v bool) { m.verboseDrives = v }
 
 // SetSelected moves the tree cursor to "overview", a host name, a pool, or
 // a dataset path on the given host (used by --dump --select).

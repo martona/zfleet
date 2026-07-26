@@ -307,6 +307,7 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		read    string
 		written string
 		note    string
+		drill   []string // the check ledger, pre-rendered, under warned leaves
 	}
 	var ents []topoEnt
 	var walk func(v *zfs.Vdev, classPrefix string, depth int)
@@ -332,6 +333,7 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 			}
 		}
 		temp, read, written := "", "", ""
+		var drill []string
 		if len(v.Children) == 0 {
 			if d := h.diskFor(v.Name); d != nil {
 				temp = "-" // resolved but unsensed
@@ -345,7 +347,8 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 					if s.WriteBytes >= 0 {
 						written = zfs.NiceBytes(s.WriteBytes)
 					}
-					// just the tier — the factfinding is phase 3's drill
+					// the tier joins the verdict; the drill beneath carries
+					// the factfinding — cause and alarm in the same panel
 					switch smartSev(s) {
 					case sevErr:
 						parts = append(parts, "FAIL")
@@ -356,6 +359,13 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 							sev = sevWarn
 						}
 					}
+					// any alarm tier on this leaf — state, counters, or the
+					// drive's own — lays the smart ledger out beneath it;
+					// an all-ok ledger under a counter badge is itself a
+					// finding (the errors are upstream of the platters)
+					if m.verboseDrives || sev > sevOK {
+						drill = drillLines(s, " "+rep("  ", depth+1)+"  ", "")
+					}
 				}
 			}
 		}
@@ -363,7 +373,7 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		if verdict == "" {
 			verdict = v.State
 		}
-		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, sevStyle(sev), temp, read, written, v.Note})
+		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, sevStyle(sev), temp, read, written, v.Note, drill})
 		for _, c := range v.Children {
 			walk(c, "", depth+1)
 		}
@@ -434,6 +444,7 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 			}
 		}
 		lines = append(lines, row)
+		lines = append(lines, e.drill...)
 	}
 
 	return lines

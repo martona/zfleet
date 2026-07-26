@@ -164,6 +164,28 @@ func (h *hostState) pool(name string) *zfs.Pool {
 	return nil
 }
 
+// poolsServedBy names the pools with a leaf vdev on the given disk — the
+// blast-radius line in a drive's drill block.
+func (h *hostState) poolsServedBy(node string) []string {
+	var out []string
+	for _, p := range h.pools {
+		hit := false
+		for _, c := range p.Classes {
+			for _, v := range c.Vdevs {
+				for _, l := range v.Leaves() {
+					if d := h.diskFor(l.Name); d != nil && d.Node == node {
+						hit = true
+					}
+				}
+			}
+		}
+		if hit {
+			out = append(out, p.Name)
+		}
+	}
+	return out
+}
+
 // noteStatsOK / noteStatsFail run the connection state machine off the
 // stats tick — the heartbeat every host answers every 2s when healthy.
 func (h *hostState) noteStatsOK() {

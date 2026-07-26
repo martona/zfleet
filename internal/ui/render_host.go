@@ -289,6 +289,12 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 			row += verdict
 		}
 		lines = append(lines, row+" "+styDim.Render(media))
+		// the drill: a warned drive lays out its whole check ledger right
+		// here — no navigation, at worst some j/k
+		if s, ok := h.smart[d.Node]; ok && (m.verboseDrives || smartSev(s) > sevOK) {
+			serves := strings.Join(h.poolsServedBy(d.Node), ", ")
+			lines = append(lines, drillLines(s, "      ", serves)...)
+		}
 	}
 	lines = append(lines, "")
 
@@ -357,4 +363,41 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 			styDim.Render(" of ")+zfs.NiceBytes(p.Size))
 	}
 	return lines
+}
+
+// drillLines renders a drive's full check ledger — every health check
+// performed, its measured value, its verdict. Passing rows recede whole;
+// warn/fail rows keep bright values and spell their tier, so the cause of
+// a WARN is unmissable in the very panel that raised it. A non-empty
+// serves list appends the blast-radius line (host roster only — the pool
+// view already knows which pool it is).
+func drillLines(s zfs.Smart, indent, serves string) []string {
+	if len(s.Checks) == 0 {
+		return nil
+	}
+	labW, valW := 0, 0
+	for _, c := range s.Checks {
+		if n := len(c.Label); n > labW {
+			labW = n
+		}
+		if n := len(c.Value); n > valW {
+			valW = n
+		}
+	}
+	var out []string
+	for _, c := range s.Checks {
+		body := padR(c.Label, labW+2) + padL(c.Value, valW)
+		switch c.Sev {
+		case zfs.CheckFail:
+			out = append(out, indent+body+"  "+styBad.Render("FAIL"))
+		case zfs.CheckWarn:
+			out = append(out, indent+body+"  "+styWarn.Render("WARN"))
+		default:
+			out = append(out, indent+styDim.Render(body+"  ok"))
+		}
+	}
+	if serves != "" {
+		out = append(out, indent+styDim.Render("serves "+serves))
+	}
+	return out
 }

@@ -38,6 +38,7 @@ func main() {
 	expand := flag.String("expand", "", "comma-separated [host:]pools/datasets to unfold for --dump tree views")
 	mark := flag.String("mark", "", "comma-separated snapshot names to mark within the single --snaps dataset (dump)")
 	filterFlag := flag.String("filter", "", "filter pattern for --dump: ds[@snap], substring or glob; sweeps the fleet like the live / key")
+	vdrives := flag.Bool("vdrives", false, "show every drive's check ledger in --dump (the live v toggle)")
 	perf := flag.String("perf", "", "pool ([host:]pool) whose performance screen to render for --dump")
 	flag.Parse()
 
@@ -233,6 +234,7 @@ func main() {
 				m.ApplyPerf(host, pool, txgs, dmuTx, zil, params, iostat, err)
 			}
 		}
+		m.SetVerboseDrives(*vdrives)
 		m.SetSize(*width, *height)
 		fmt.Println(m.View())
 		return

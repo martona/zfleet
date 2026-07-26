@@ -17,16 +17,34 @@ type Smart struct {
 	PowerOnH   int64
 	ReadBytes  int64 // lifetime host reads, -1 unknown
 	WriteBytes int64
-	LifeUsed   int      // nvme percentage_used, -1 elsewhere
-	SparePct   int      // nvme available_spare, -1 elsewhere
-	Warns      []string // nonempty = warn tier; the reasons, drill fodder
-	Standby    bool     // drive was asleep; politely not woken
+	LifeUsed   int          // nvme percentage_used, -1 elsewhere
+	SparePct   int          // nvme available_spare, -1 elsewhere
+	Checks     []SmartCheck // every check performed, canonical order
+	Warns      []string     // the warn-tier reasons, derived from Checks
+	Standby    bool         // drive was asleep; politely not woken
 }
+
+// SmartCheck is one health check the tool performed on a drive: a stable
+// id (the future ack key), a display label, the measured value, and the
+// verdict tier. Only checks whose data the drive actually reported exist —
+// "all clear" and "not checked" must stay distinguishable.
+type SmartCheck struct {
+	ID    string // "overall", "ata5", "nvme-spare", "scsi-defects", …
+	Label string
+	Value string
+	Sev   int // CheckOK / CheckWarn / CheckFail
+}
+
+const (
+	CheckOK = iota
+	CheckWarn
+	CheckFail
+)
 
 // ata attribute ids that spell trouble, by id — names vary per vendor
 // (Samsung calls 187 Uncorrectable_Error_Cnt, Seagate Reported_Uncorrect)
 var ataCritical = map[int]string{
-	5:   "realloc",
+	5:   "reallocated",
 	187: "reported uncorrect",
 	197: "pending sectors",
 	198: "offline uncorrect",
@@ -89,8 +107,27 @@ func ParseSmart(text string) (Smart, bool) {
 	s := Smart{TempC: -1, PowerOnH: -1, ReadBytes: -1, WriteBytes: -1, LifeUsed: -1, SparePct: -1}
 	// exit bit 1 = device open ok but in low-power mode (-n standby honored)
 	s.Standby = j.Smartctl.ExitStatus&2 != 0 && j.SmartStatus == nil
+	// every verdict flows through here: the check ledger is the record of
+	// what was measured, Warns the warn-tier extract of it
+	check := func(id, label, value string, sev int) {
+		s.Checks = append(s.Checks, SmartCheck{ID: id, Label: label, Value: value, Sev: sev})
+		if sev == CheckWarn {
+			s.Warns = append(s.Warns, label+" "+value)
+		}
+	}
+	warnIf := func(bad bool) int {
+		if bad {
+			return CheckWarn
+		}
+		return CheckOK
+	}
 	if j.SmartStatus != nil {
 		s.HaveStatus, s.Passed = true, j.SmartStatus.Passed
+		if s.Passed {
+			check("overall", "smart overall", "PASSED", CheckOK)
+		} else {
+			check("overall", "smart overall", "FAILED", CheckFail)
+		}
 	}
 	if j.Temperature != nil && j.Temperature.Current > 0 {
 		s.TempC = j.Temperature.Current
@@ -98,28 +135,27 @@ func ParseSmart(text string) (Smart, bool) {
 	if j.PowerOnTime != nil {
 		s.PowerOnH = j.PowerOnTime.Hours
 	}
-	warn := func(msg string) { s.Warns = append(s.Warns, msg) }
 	if n := j.Nvme; n != nil {
 		s.ReadBytes = n.DataUnitsRead * 512000 // units of 1000×512B, per spec
 		s.WriteBytes = n.DataUnitsWritten * 512000
 		s.LifeUsed = n.PercentageUsed
 		s.SparePct = n.AvailableSpare
-		if n.CriticalWarning != 0 {
-			warn("critical warning")
-		}
-		if n.MediaErrors > 0 {
-			warn("media errors " + NiceCount(n.MediaErrors))
-		}
+		// ledger values are EXACT — the drill is the factfinding surface;
+		// rounded counts belong to the zpool badges they came from
+		check("nvme-critical", "critical warning", itoa(n.CriticalWarning),
+			warnIf(n.CriticalWarning != 0))
+		check("nvme-media", "media errors", itoa(n.MediaErrors),
+			warnIf(n.MediaErrors > 0))
 		// health.sh's line: spare under 95 is news (fabric controllers
-		// that lie about spare get the ack treatment in phase 3)
-		if n.AvailableSpare < 95 {
-			warn("spare " + itoa(int64(n.AvailableSpare)) + "%")
-		}
-		if n.PercentageUsed >= 90 {
-			warn("life used " + itoa(int64(n.PercentageUsed)) + "%")
-		}
+		// that lie about spare get the ack treatment when acks land)
+		check("nvme-spare", "spare", itoa(int64(n.AvailableSpare))+"%",
+			warnIf(n.AvailableSpare < 95))
+		check("nvme-life", "life used", itoa(int64(n.PercentageUsed))+"%",
+			warnIf(n.PercentageUsed >= 90))
 	}
 	if j.Ata != nil {
+		vals := map[int]int64{}
+		present := map[int]bool{}
 		for _, a := range j.Ata.Table {
 			switch a.ID {
 			case 241:
@@ -127,14 +163,22 @@ func ParseSmart(text string) (Smart, bool) {
 			case 242:
 				s.ReadBytes = ataLifetime(a.Name, a.Raw.Value)
 			default:
-				if name, crit := ataCritical[a.ID]; crit && a.Raw.Value > 0 {
-					warn(name + " " + NiceCount(a.Raw.Value))
+				if _, crit := ataCritical[a.ID]; crit {
+					vals[a.ID], present[a.ID] = a.Raw.Value, true
 				}
 			}
 		}
+		// canonical order regardless of the vendor's table order
+		for _, id := range []int{5, 187, 197, 198} {
+			if present[id] {
+				check("ata"+itoa(int64(id)), ataCritical[id], itoa(vals[id]),
+					warnIf(vals[id] > 0))
+			}
+		}
 	}
-	if j.GrownDefects != nil && *j.GrownDefects > 0 {
-		warn("grown defects " + NiceCount(*j.GrownDefects))
+	if j.GrownDefects != nil {
+		check("scsi-defects", "grown defects", itoa(*j.GrownDefects),
+			warnIf(*j.GrownDefects > 0))
 	}
 	return s, true
 }

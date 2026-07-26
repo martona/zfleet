@@ -51,16 +51,23 @@ func (m *Model) cheatBase() []keyHint {
 			return append(head, keyHint{"/", "filter"}, keyHint{"s", "sort"},
 				keyHint{"p", "perf"}, keyHint{"q", "quit"})
 		}
+		vLabel := "all checks"
+		if m.verboseDrives {
+			vLabel = "warns only"
+		}
 		var head []keyHint
 		switch row.kind {
 		case rOverview:
 			head = []keyHint{{"↓", "browse"}}
+		case rHost:
+			head = []keyHint{{"v", vLabel}}
 		case rPool:
 			if row.expanded {
 				head = append(head, keyHint{"←", "collapse"})
 			} else {
 				head = append(head, keyHint{"→", "expand"})
 			}
+			head = append(head, keyHint{"v", vLabel})
 		case rDataset:
 			switch {
 			case row.expanded:

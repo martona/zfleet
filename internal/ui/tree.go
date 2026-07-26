@@ -455,6 +455,8 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.treeMove(-1)
 			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
 		}
+	case "v":
+		m.verboseDrives = !m.verboseDrives
 	case "esc":
 		switch {
 		case len(m.marks) > 0:

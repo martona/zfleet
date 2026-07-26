@@ -54,6 +54,17 @@ func TestParseSmartSuperMicro(t *testing.T) {
 	if len(d.Warns) != 1 || d.Warns[0] != "reported uncorrect 52" {
 		t.Errorf("sdd warns = %v, want the 52 reported-uncorrect", d.Warns)
 	}
+	// the check ledger behind the warn: overall PASSED ok, ata187 warn 52
+	byID := map[string]SmartCheck{}
+	for _, c := range d.Checks {
+		byID[c.ID] = c
+	}
+	if c := byID["overall"]; c.Value != "PASSED" || c.Sev != CheckOK {
+		t.Errorf("sdd overall check = %+v", c)
+	}
+	if c := byID["ata187"]; c.Value != "52" || c.Sev != CheckWarn || c.Label != "reported uncorrect" {
+		t.Errorf("sdd ata187 check = %+v", c)
+	}
 }
 
 func TestParseSmartVerdicts(t *testing.T) {
@@ -61,6 +72,13 @@ func TestParseSmartVerdicts(t *testing.T) {
 		"ata_smart_attributes":{"table":[{"id":197,"raw":{"value":8}},{"id":5,"raw":{"value":0}}]}}`
 	if s, ok := ParseSmart(pending); !ok || len(s.Warns) != 1 || s.Warns[0] != "pending sectors 8" {
 		t.Errorf("pending case = %+v", s)
+	} else {
+		// ledger: overall + the two PRESENT attrs (5 ok, 197 warn) in
+		// canonical order — absent attrs must not fabricate ok rows
+		if len(s.Checks) != 3 || s.Checks[1].ID != "ata5" || s.Checks[1].Sev != CheckOK ||
+			s.Checks[2].ID != "ata197" || s.Checks[2].Sev != CheckWarn {
+			t.Errorf("pending checks = %+v", s.Checks)
+		}
 	}
 	spare := `{"smart_status":{"passed":true},
 		"nvme_smart_health_information_log":{"available_spare":80,"available_spare_threshold":10,
@@ -71,6 +89,8 @@ func TestParseSmartVerdicts(t *testing.T) {
 	failed := `{"smart_status":{"passed":false},"temperature":{"current":55}}`
 	if s, _ := ParseSmart(failed); !s.HaveStatus || s.Passed {
 		t.Error("failed drive parsed as passing")
+	} else if len(s.Checks) != 1 || s.Checks[0].Value != "FAILED" || s.Checks[0].Sev != CheckFail {
+		t.Errorf("failed checks = %+v", s.Checks)
 	}
 	standby := `{"smartctl":{"exit_status":2}}`
 	if s, _ := ParseSmart(standby); !s.Standby {
