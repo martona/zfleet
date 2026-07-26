@@ -10,13 +10,14 @@ import (
 )
 
 // The tree screen: one expandable tree — overview row, hosts (when any
-// remote is registered), pools, and as much of the dataset hierarchy as the
-// user has unfolded. Two presentations of the same rows: cursor on
-// "≡ overview" drops the inspector and renders full-width with io columns;
-// cursor anywhere else is the classic two-pane browse. → expands in place,
-// ← collapses (or jumps to parent), Enter drills into the deep-dive
-// browser. Host rows are organizational anchors: always open, never
-// collapsible — folding one would hide the very info you came looking for.
+// remote is registered), pools, as much of the dataset hierarchy as the
+// user has unfolded, and, per dataset on demand (`t`), its snapshots. Two
+// presentations of the same rows: cursor on "≡ overview" drops the
+// inspector and renders full-width with io columns; cursor anywhere else is
+// the classic two-pane browse. →/Enter expands in place, ← collapses (or
+// jumps to parent). Host rows are organizational anchors: always open,
+// never collapsible — folding one would hide the very info you came
+// looking for.
 
 const overviewID = "≡"
 
@@ -25,14 +26,19 @@ const (
 	rHost
 	rPool
 	rDataset
+	rFam
+	rSnap
 )
 
 type treeRow struct {
 	kind       int
 	host       *hostState
 	pool       *zfs.Pool
-	ds         *zfs.Dataset
-	depth      int // dataset rows: 1 = root dataset
+	ds         *zfs.Dataset // rDataset: the row itself; rFam/rSnap: the owning dataset
+	fam        *zfs.SnapFamily
+	snap       *zfs.Snapshot
+	member     bool // snapshot scattered from an unfolded family
+	depth      int  // dataset rows: 1 = root dataset; snap rows: owner depth + 1
 	id         string
 	parentID   string
 	expandable bool
@@ -40,10 +46,14 @@ type treeRow struct {
 }
 
 // row ids are host-qualified so identical pool names on different hosts
-// stay distinct; \x00 can appear in neither
+// stay distinct; \x00 can appear in neither. A snapshot row's id is simply
+// the dataset id of its full zfs name (ds@snap).
 func treeHostID(h *hostState) string              { return "h:" + h.name }
 func treePoolID(h *hostState, name string) string { return "p:" + h.name + "\x00" + name }
 func treeDsID(h *hostState, name string) string   { return h.name + "\x00" + name }
+func treeFamID(h *hostState, ds, label string) string {
+	return "f:" + h.name + "\x00" + ds + "\x00" + label
+}
 
 // splitPoolID recovers (host, pool) from a pool row id.
 func splitPoolID(m *Model, id string) (*hostState, string, bool) {
@@ -95,10 +105,16 @@ func (m *Model) treeRows() []treeRow {
 				exp := m.expanded[id]
 				rows = append(rows, treeRow{
 					kind: rDataset, host: h, ds: d, depth: depth, id: id, parentID: parent,
-					expandable: len(d.Children) > 0, expanded: exp,
+					expandable: len(d.Children) > 0 || m.snapsShown[id], expanded: exp,
 				})
 				if !exp {
 					return
+				}
+				// snapshots first — they belong to the dataset you just
+				// toggled them on, so they appear right under it, above any
+				// descent into children
+				if m.snapsShown[id] {
+					rows = append(rows, m.snapRows(h, d, depth+1, id)...)
 				}
 				kids := append([]*zfs.Dataset(nil), d.Children...)
 				if m.treeSortUsed {
@@ -112,6 +128,48 @@ func (m *Model) treeRows() []treeRow {
 			}
 			walk(root, 1, pid)
 		}
+	}
+	return rows
+}
+
+// snapRows builds a dataset's snapshot rows. Strictly chronological: a
+// family row sits at the slot its earliest member earned; unfolding it
+// scatters the members to their own chronological positions among the named
+// snapshots.
+func (m *Model) snapRows(h *hostState, d *zfs.Dataset, depth int, parent string) []treeRow {
+	type cand struct {
+		t int64
+		r treeRow
+	}
+	var cands []cand
+	for _, e := range zfs.GroupSnapshots(h.dsSnaps[d.Name], familyMinSize) {
+		if e.Fam != nil {
+			fid := treeFamID(h, d.Name, e.Fam.Label())
+			exp := m.expanded[fid]
+			cands = append(cands, cand{e.Fam.Oldest().Creation, treeRow{
+				kind: rFam, host: h, ds: d, fam: e.Fam, depth: depth,
+				id: fid, parentID: parent, expandable: true, expanded: exp,
+			}})
+			if !exp {
+				continue
+			}
+			for _, s := range e.Fam.Snaps {
+				cands = append(cands, cand{s.Creation, treeRow{
+					kind: rSnap, host: h, ds: d, snap: s, member: true, depth: depth,
+					id: treeDsID(h, d.Name+"@"+s.Snap), parentID: parent,
+				}})
+			}
+		} else {
+			cands = append(cands, cand{e.Snap.Creation, treeRow{
+				kind: rSnap, host: h, ds: d, snap: e.Snap, depth: depth,
+				id: treeDsID(h, d.Name+"@"+e.Snap.Snap), parentID: parent,
+			}})
+		}
+	}
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].t < cands[j].t })
+	rows := make([]treeRow, len(cands))
+	for i, c := range cands {
+		rows[i] = c.r
 	}
 	return rows
 }
@@ -153,12 +211,49 @@ func (m *Model) treeMove(delta int) {
 
 // treeEnsure lazily fetches whatever the selected row's inspector needs.
 func (m *Model) treeEnsure() tea.Cmd {
-	row := m.treeSelected()
-	if row.kind != rDataset {
-		return nil
+	switch row := m.treeSelected(); row.kind {
+	case rDataset:
+		return tea.Batch(m.ensureSnapsCmd(row.host, row.ds.Name),
+			m.ensurePropsCmd(row.host, row.ds.Name))
+	case rFam:
+		// don't tell the user a dry-run is needed — just run it
+		return m.ensureDryCmd(row.host, famTarget(row.ds.Name, row.fam))
 	}
-	return tea.Batch(m.ensureSnapsCmd(row.host, row.ds.Name),
-		m.ensurePropsCmd(row.host, row.ds.Name))
+	return nil
+}
+
+// toggleSnapsShown handles `t`: snapshots in or out of the tree, for the
+// dataset under the cursor or the one owning the snapshot under it.
+func (m *Model) toggleSnapsShown() (tea.Cmd, bool) {
+	row := m.treeSelected()
+	id := row.id
+	switch row.kind {
+	case rDataset:
+	case rSnap, rFam:
+		id = row.parentID
+	default:
+		return nil, false
+	}
+	h, ds := row.host, row.ds
+	if m.snapsShown[id] {
+		delete(m.snapsShown, id)
+		if len(ds.Children) == 0 {
+			delete(m.expanded, id)
+		}
+		if row.kind != rDataset {
+			m.treeSel = id // the row under the cursor just vanished
+		}
+		if m.markOwner == id {
+			m.clearMarks()
+		}
+		return nil, true
+	}
+	if s, ok := h.dsSnaps[ds.Name]; ok && len(s) == 0 {
+		return nil, true // nothing to show; the inspector already says so
+	}
+	m.snapsShown[id] = true
+	m.expanded[id] = true
+	return m.ensureSnapsCmd(h, ds.Name), true
 }
 
 func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -179,7 +274,7 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if rows := m.treeRows(); len(rows) > 0 {
 			m.treeSel = rows[len(rows)-1].id
 		}
-	case "right", "l":
+	case "right", "l", "enter":
 		row := m.treeSelected()
 		if row.expandable && !row.expanded {
 			m.expanded[row.id] = true
@@ -195,15 +290,22 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case row.parentID != "":
 			m.treeSel = row.parentID
 		}
-	case "enter":
-		switch row := m.treeSelected(); row.kind {
-		case rHost:
-			return m, m.enterBrowserAt(row.host, "")
-		case rPool:
-			return m, m.enterBrowserAt(row.host, row.pool.Name)
-		case rDataset:
-			return m, m.enterBrowserAt(row.host, row.ds.Name)
+	case "t":
+		if cmd, ok := m.toggleSnapsShown(); ok {
+			return m, cmd
 		}
+	case " ", "shift+down":
+		if m.toggleMark(m.treeSelected()) {
+			m.treeMove(1)
+			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
+		}
+	case "shift+up":
+		if m.toggleMark(m.treeSelected()) {
+			m.treeMove(-1)
+			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
+		}
+	case "esc":
+		m.clearMarks()
 	case "s":
 		m.treeSortUsed = !m.treeSortUsed
 	}

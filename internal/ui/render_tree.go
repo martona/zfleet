@@ -65,6 +65,13 @@ func (m *Model) treeNameW(rows []treeRow) int {
 			n = 2*ind + 2 + lipgloss.Width(r.pool.Name)
 		case rDataset:
 			n = 2*ind + 2*r.depth + 2 + lipgloss.Width(r.ds.Base())
+		case rFam:
+			n = 2*ind + 2*r.depth + 2 + lipgloss.Width(famLabel(r.fam))
+		case rSnap:
+			n = 2*ind + 2*r.depth + 2 + lipgloss.Width("@"+r.snap.Snap)
+			if r.member {
+				n++
+			}
 		}
 		if n > nameW {
 			nameW = n
@@ -188,8 +195,50 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 			return styInv.Render(lead + used)
 		}
 		return lead + dimUnit(used)
+
+	case rFam:
+		markCh := " "
+		if m.famAllMarked(r) {
+			markCh = "*"
+		}
+		prefix := rep("  ", ind+r.depth) + expandMark(r) + markCh
+		name := truncate(famLabel(r.fam), nameW-lipgloss.Width(prefix))
+		used := padL(zfs.NiceBytes(r.fam.Used()), usedCellW)
+		lead := padR(prefix+name, nameW) + " " + rep(" ", stateCellW+capCellW) + " "
+		switch {
+		case onCur:
+			return styInv.Render(lead + used)
+		case markCh == "*":
+			return styWarn.Render(lead + used)
+		}
+		return lead + dimUnit(used)
+
+	case rSnap:
+		markCh := " "
+		if r.parentID == m.markOwner && m.marks[r.snap.Snap] {
+			markCh = "*"
+		}
+		prefix := rep("  ", ind+r.depth) + markCh + " "
+		if r.member {
+			prefix += " " // scattered out of an unfolded family
+		}
+		name := truncate("@"+r.snap.Snap, nameW-lipgloss.Width(prefix))
+		used := padL(zfs.NiceBytes(r.snap.Used), usedCellW)
+		lead := padR(prefix+name, nameW) + " " + rep(" ", stateCellW+capCellW) + " "
+		switch {
+		case onCur:
+			return styInv.Render(lead + used)
+		case markCh == "*":
+			return styWarn.Render(lead + used)
+		}
+		return styDim.Render(lead + used)
 	}
 	return ""
+}
+
+// famLabel is a family row's display name: the shared prefix and the count.
+func famLabel(f *zfs.SnapFamily) string {
+	return fmt.Sprintf("@%s (%d)", f.Label(), len(f.Snaps))
 }
 
 // treeNarrowPane renders the table for the two-pane presentation: the same

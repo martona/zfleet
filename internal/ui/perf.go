@@ -99,30 +99,22 @@ func (m *Model) perfPoolFor(h *hostState) string {
 func (m *Model) enterPerf() tea.Cmd {
 	var h *hostState
 	pool := ""
-	switch m.mode {
-	case modeBrowser:
-		h, pool = m.br.host, m.br.pool
-		if pool == "" && h != nil { // browser host level
-			pool = m.perfPoolFor(h)
-		}
+	switch row := m.treeSelected(); row.kind {
+	case rHost:
+		h, pool = row.host, m.perfPoolFor(row.host)
+	case rPool:
+		h, pool = row.host, row.pool.Name
+	case rDataset, rFam, rSnap:
+		h, pool = row.host, poolOf(row.ds.Name)
 	default:
-		switch row := m.treeSelected(); row.kind {
-		case rHost:
-			h, pool = row.host, m.perfPoolFor(row.host)
-		case rPool:
-			h, pool = row.host, row.pool.Name
-		case rDataset:
-			h, pool = row.host, poolOf(row.ds.Name)
-		default:
-			// overview: pick the busiest pool by current physical io,
-			// fleet-wide
-			var best int64 = -1
-			for _, hh := range m.hosts {
-				for _, p := range hh.pools {
-					io := hh.io[p.Name]
-					if v := io.RBw + io.WBw; v > best {
-						best, h, pool = v, hh, p.Name
-					}
+		// overview: pick the busiest pool by current physical io,
+		// fleet-wide
+		var best int64 = -1
+		for _, hh := range m.hosts {
+			for _, p := range hh.pools {
+				io := hh.io[p.Name]
+				if v := io.RBw + io.WBw; v > best {
+					best, h, pool = v, hh, p.Name
 				}
 			}
 		}

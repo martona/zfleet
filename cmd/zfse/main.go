@@ -33,10 +33,10 @@ func main() {
 	width := flag.Int("width", 110, "frame width for --dump")
 	height := flag.Int("height", 30, "frame height for --dump")
 	sel := flag.String("select", "", "row to select for --dump: overview, [host:]pool, [host:]dataset, or a host name")
-	browse := flag.String("browse", "", "dataset ([host:]path) whose browser level to render for --dump; a bare host name opens its host level")
-	cursor := flag.String("cursor", "", "row to select within --browse (child base name or @snap)")
+	snapsFlag := flag.String("snaps", "", "comma-separated [host:]datasets whose snapshots to unfold into the tree for --dump (the t toggle); ds@label also unfolds that family")
+	cursor := flag.String("cursor", "", "visible row to move the --dump cursor to: @snap, @family label, dataset, pool, or host")
 	expand := flag.String("expand", "", "comma-separated [host:]pools/datasets to unfold for --dump tree views")
-	mark := flag.String("mark", "", "comma-separated snapshot names to select within --browse (dump)")
+	mark := flag.String("mark", "", "comma-separated snapshot names to mark within the single --snaps dataset (dump)")
 	perf := flag.String("perf", "", "pool ([host:]pool) whose performance screen to render for --dump")
 	flag.Parse()
 
@@ -136,6 +136,46 @@ func main() {
 				m.ExpandFor(host, path)
 			}
 		}
+		if *snapsFlag != "" {
+			var lastHost, lastPath string
+			n := 0
+			for _, item := range strings.Split(*snapsFlag, ",") {
+				item = strings.TrimSpace(item)
+				if item == "" {
+					continue
+				}
+				host, path := hostFor(item)
+				ds := strings.SplitN(path, "@", 2)[0]
+				src := srcOf(host)
+				pool := strings.SplitN(ds, "/", 2)[0]
+				dsText, err := src.DatasetTexts(ctx, pool)
+				if err != nil {
+					fail("collect datasets: " + err.Error())
+				}
+				m.ApplyDatasets(host, pool, dsText)
+				if !m.ShowSnaps(host, path) {
+					fail("host not found: " + item)
+				}
+				if snapText, err := src.SnapshotTexts(ctx, ds); err == nil {
+					m.ApplySnaps(host, ds, snapText)
+				}
+				if propText, err := src.PropTexts(ctx, ds); err == nil {
+					m.ApplyProps(host, ds, propText)
+				}
+				lastHost, lastPath = host, ds
+				n++
+			}
+			if *mark != "" {
+				if n != 1 {
+					fail("--mark needs exactly one --snaps dataset")
+				}
+				m.MarkSnaps(lastHost, lastPath, strings.Split(*mark, ","))
+				if target := m.MarkTarget(); target != "" {
+					text, err := srcOf(lastHost).DestroyDryRun(ctx, target)
+					m.ApplyDryRun(lastHost, target, text, err)
+				}
+			}
+		}
 		if *sel != "" {
 			host, name := hostFor(*sel)
 			m.SetSelected(host, name)
@@ -148,53 +188,13 @@ func main() {
 				}
 			}
 		}
-		if *browse != "" {
-			host, path := hostFor(*browse)
-			if path == "" { // bare host name: its pools level
-				if !m.BrowseTo(host, "") {
-					fail("host not found: " + *browse)
-				}
-			} else {
-				src := srcOf(host)
-				pool := strings.SplitN(path, "/", 2)[0]
-				dsText, err := src.DatasetTexts(ctx, pool)
-				if err != nil {
-					fail("collect datasets: " + err.Error())
-				}
-				m.ApplyDatasets(host, pool, dsText)
-				if !m.BrowseTo(host, path) {
-					fail("dataset not found: " + path)
-				}
-				if snapText, err := src.SnapshotTexts(ctx, path); err == nil {
-					m.ApplySnaps(host, path, snapText)
-				}
-				if propText, err := src.PropTexts(ctx, path); err == nil {
-					m.ApplyProps(host, path, propText)
-				}
-				if *mark != "" {
-					m.MarkSnaps(strings.Split(*mark, ","))
-					if target := m.SelectionTarget(); target != "" {
-						text, err := src.DestroyDryRun(ctx, target)
-						m.ApplyDryRun(host, target, text, err)
-					}
-				}
-				if *cursor != "" {
-					if !m.SetCursorRow(*cursor) {
-						fail("row not found at this level: " + *cursor)
-					}
-					if target := m.SelectedFamTarget(); target != "" {
-						text, err := src.DestroyDryRun(ctx, target)
-						m.ApplyDryRun(host, target, text, err)
-					}
-					if ds := m.SelectedDatasetName(); ds != "" && ds != path {
-						if snapText, err := src.SnapshotTexts(ctx, ds); err == nil {
-							m.ApplySnaps(host, ds, snapText)
-						}
-						if propText, err := src.PropTexts(ctx, ds); err == nil {
-							m.ApplyProps(host, ds, propText)
-						}
-					}
-				}
+		if *cursor != "" {
+			if !m.SetCursorRow(*cursor) {
+				fail("row not visible: " + *cursor)
+			}
+			if host, target := m.SelectedFamTarget(); target != "" {
+				text, err := srcOf(host).DestroyDryRun(ctx, target)
+				m.ApplyDryRun(host, target, text, err)
 			}
 		}
 		if *perf != "" {

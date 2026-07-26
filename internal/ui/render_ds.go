@@ -9,240 +9,17 @@ import (
 	"github.com/martona/zfs-explorer/internal/zfs"
 )
 
-func (m *Model) breadcrumb() string {
-	var crumb string
-	switch c := m.brContainer(); {
-	case m.brAtHostLevel():
-		crumb = m.br.host.name
-	case c == nil:
-		crumb = m.brQualify(m.br.pool)
-	default:
-		segs := strings.Split(c.Name, "/")
-		segs[0] = m.brQualify(segs[0])
-		crumb = strings.Join(segs, " ▸ ")
-	}
-	if m.br.filterIn || m.br.filter != "" {
-		crumb += "  /" + m.br.filter
-		if m.br.filterIn {
-			crumb += "▏"
-		}
-	}
-	if n := len(m.br.selSnaps); n > 0 {
-		crumb += fmt.Sprintf(" · %d sel", n)
-	}
-	return crumb
-}
-
-// brQualify prefixes a pool name with its host, scp-style, once there is
-// more than one host to tell apart.
-func (m *Model) brQualify(pool string) string {
-	if m.multiHost && m.br.host != nil {
-		return m.br.host.name + ":" + pool
-	}
-	return pool
-}
-
-func brLeftPane(m *Model, w, h int) []string {
-	if m.brAtHostLevel() {
-		return brHostLevelPane(m, w, h)
-	}
-	c := m.brContainer()
-	if c == nil {
-		return []string{" " + styDim.Render("collecting datasets…")}
-	}
-	entries := m.brEntries()
-	cur := m.brCursorIdx(entries)
-
-	// child rows: "▸   name/......... ▓▓░░░ 37.8T"
-	nameW := w - 2 - 2 - 1 - 5 - 1 - 6 - 1
-	if nameW < 10 {
-		nameW = 10
-	}
-	var lines []string
-	for i, e := range entries {
-		onCur := i == cur
-		var row string
-		switch e.kind {
-		case eSelf:
-			// leftmost row of the level: the container out-dents its own
-			// snapshots and children, never the other way around
-			name := e.ds.Base()
-			if e.ds.IsVolume() {
-				name += " v"
-			}
-			body := padR(truncate(name, nameW+6), nameW+6) + " " + padL(zfs.NiceBytes(e.ds.Used), 7)
-			if onCur {
-				row = styInv.Render(padR("▸ "+body, w))
-			} else {
-				row = "  " + styBold.Render(body)
-			}
-		case eChild:
-			name := e.ds.Base()
-			if len(e.ds.Children) > 0 {
-				name += "/"
-			} else if e.ds.IsVolume() {
-				name = truncate(name, nameW-2) + " v"
-			}
-			share := int64(-1)
-			if c.Used > 0 {
-				share = e.ds.Used * 100 / c.Used
-			}
-			left := "    " + padR(truncate(name, nameW), nameW) + " "
-			right := " " + padL(zfs.NiceBytes(e.ds.Used), 6)
-			if onCur {
-				left = styInv.Render("▸   " + padR(truncate(name, nameW), nameW) + " ")
-				row = left + bar(share, 5) + styInv.Render(padR(right, w-nameW-11))
-			} else {
-				row = left + bar(share, 5) + right
-			}
-		case eFam:
-			all := len(e.fam.Snaps) > 0
-			for _, s := range e.fam.Snaps {
-				if !m.br.selSnaps[s.Snap] {
-					all = false
-					break
-				}
-			}
-			selMark := " "
-			if all {
-				selMark = "*"
-			}
-			body := selMark + padR(truncate("@"+e.fam.Label()+fmt.Sprintf(" (%d)", len(e.fam.Snaps)), nameW+5), nameW+5) +
-				" " + padL(zfs.NiceBytes(e.fam.Used()), 6)
-			switch {
-			case onCur:
-				row = styInv.Render(padR("▸"+body, w))
-			case all:
-				row = " " + styWarn.Render(body)
-			default:
-				row = " " + body
-			}
-		case eSnap:
-			selMark := " "
-			if m.br.selSnaps[e.snap.Snap] {
-				selMark = "*"
-			}
-			indent := ""
-			if e.member {
-				indent = " "
-			}
-			body := selMark + indent + padR(truncate("@"+e.snap.Snap, nameW+5-len(indent)), nameW+5-len(indent)) +
-				" " + padL(zfs.NiceBytes(e.snap.Used), 6)
-			switch {
-			case onCur:
-				row = styInv.Render(padR("▸"+body, w))
-			case selMark == "*":
-				row = " " + styWarn.Render(body)
-			default:
-				row = " " + styDim.Render(body)
-			}
-		}
-		lines = append(lines, row)
-	}
-
-	// keep the cursor visible on long levels
-	if len(lines) > h && cur >= h-1 {
-		start := cur - h + 2
-		lines = append(lines[start:], " "+styDim.Render(fmt.Sprintf("… (%d above)", start)))
-		copy(lines[1:], lines[:len(lines)-1])
-		lines[0] = " " + styDim.Render(fmt.Sprintf("… (%d above)", start))
-		lines = lines[:h]
-	}
-	return clampLines(lines, h)
-}
-
-// brHostLevelPane renders the pools-of-a-host level: the host as its own
-// leftmost self row, pools as children with share-of-allocated bars.
-func brHostLevelPane(m *Model, w, h int) []string {
-	host := m.br.host
-	entries := m.brEntries()
-	cur := m.brCursorIdx(entries)
-
-	var total int64
-	for _, p := range host.pools {
-		if p.Alloc > 0 {
-			total += p.Alloc
-		}
-	}
-	nameW := w - 2 - 2 - 1 - 5 - 1 - 6 - 1
-	if nameW < 10 {
-		nameW = 10
-	}
-	var lines []string
-	for i, e := range entries {
-		onCur := i == cur
-		var row string
-		switch e.kind {
-		case eHostSelf:
-			body := padR(truncate(host.name, nameW+6), nameW+6) + " " + padL(zfs.NiceBytes(total), 7)
-			if onCur {
-				row = styInv.Render(padR("▸ "+body, w))
-			} else {
-				row = "  " + styBold.Render(body)
-			}
-		case ePool:
-			share := int64(-1)
-			if total > 0 && e.pool.Alloc >= 0 {
-				share = e.pool.Alloc * 100 / total
-			}
-			name := e.pool.Name + "/"
-			left := "    " + padR(truncate(name, nameW), nameW) + " "
-			right := " " + padL(zfs.NiceBytes(e.pool.Alloc), 6)
-			if onCur {
-				left = styInv.Render("▸   " + padR(truncate(name, nameW), nameW) + " ")
-				row = left + bar(share, 5) + styInv.Render(padR(right, w-nameW-11))
-			} else {
-				row = left + bar(share, 5) + right
-			}
-		}
-		lines = append(lines, row)
-	}
-	return clampLines(lines, h)
-}
-
-func brRightTitle(m *Model, sel brEntry) string {
-	switch sel.kind {
-	case eSelf, eChild:
-		return sel.ds.Base()
-	case eFam:
-		return "@" + sel.fam.Label()
-	case eSnap:
-		return "@" + sel.snap.Snap
-	case eHostSelf:
-		return m.br.host.name
-	case ePool:
-		return sel.pool.Name
-	}
-	return ""
-}
-
-func brInspector(m *Model, sel brEntry, w int) []string {
-	if len(m.br.selSnaps) > 0 {
-		return selInspector(m, w)
-	}
-	switch sel.kind {
-	case eSelf, eChild:
-		return dsInspector(m, m.br.host, sel.ds, w)
-	case eFam:
-		return famInspector(m, sel.fam, w)
-	case eSnap:
-		return snapInspector(m, sel.snap)
-	case eHostSelf:
-		return hostInspector(m, m.br.host, w)
-	case ePool:
-		return inspector(m, m.br.host, sel.pool, w)
-	}
-	return nil
-}
+// Right-panel inspectors for datasets, snapshots, snapshot families, and
+// the mark selection. All of them render into the tree's two-pane frame.
 
 // reclaimLines renders the dry-run verdict for a target: the verbatim
 // "would reclaim" line once known, the Σ lower bound only until then.
-func (m *Model) reclaimLines(target string, snaps []*zfs.Snapshot, w int) []string {
+func reclaimLines(h *hostState, target string, snaps []*zfs.Snapshot, w int) []string {
 	var sum int64
 	for _, s := range snaps {
 		sum += s.Used
 	}
-	r := m.br.host.dryCache[target]
+	r := h.dryCache[target]
 	switch {
 	case r != nil && r.errText != "":
 		return []string{
@@ -314,14 +91,14 @@ func snapTable(snaps []*zfs.Snapshot, w int) []string {
 // selInspector shows the marked snapshots and the authoritative reclaim
 // figure — per-snapshot sums lie (shared blocks), the dry-run doesn't.
 func selInspector(m *Model, w int) []string {
-	sel := m.brSelection()
-	c := m.brContainer()
+	h, ds := m.markHostDs()
+	sel := m.markedSnaps()
 	lines := []string{
 		fmt.Sprintf(" %d snapshots selected", len(sel)),
-		" " + styDim.Render("of "+truncate(c.Name, w-6)),
+		" " + styDim.Render("of "+truncate(ds, w-6)),
 		"",
 	}
-	lines = append(lines, m.reclaimLines(m.SelectionTarget(), sel, w)...)
+	lines = append(lines, reclaimLines(h, m.MarkTarget(), sel, w)...)
 	lines = append(lines, "")
 	show := sel
 	if len(show) > 12 {
@@ -565,6 +342,12 @@ func dsInspector(m *Model, h *hostState, d *zfs.Dataset, w int) []string {
 				lines = append(lines, "   "+styDim.Render(zfs.NiceBytes(uniq)+" unique · "+
 					zfs.NiceBytes(shared)+" shared across snapshots"))
 			}
+			// the toggle that replaced the old browse mode — loud on purpose
+			hint := " show snapshots in the tree"
+			if m.snapsShown[treeDsID(h, d.Name)] {
+				hint = " hide snapshots"
+			}
+			lines = append(lines, " "+styInv.Render(" t ")+hint)
 		}
 	} else {
 		lines = append(lines, " "+styDim.Render("snaps …"))
@@ -597,13 +380,13 @@ func snapInspector(m *Model, s *zfs.Snapshot) []string {
 		" "+padR("created", 8)+absDate(s.Creation)+" "+styDim.Render("("+relAge(s.Creation)+")"))
 }
 
-func famInspector(m *Model, f *zfs.SnapFamily, w int) []string {
+func famInspector(m *Model, h *hostState, container string, f *zfs.SnapFamily, w int) []string {
 	lines := []string{
 		fmt.Sprintf(" @%s · %d snapshots", f.Label(), len(f.Snaps)),
 		" " + styDim.Render(absDate(f.Oldest().Creation)+" → "+absDate(f.Newest().Creation)),
 		"",
 	}
-	lines = append(lines, m.reclaimLines(m.famTarget(f), f.Snaps, w)...)
+	lines = append(lines, reclaimLines(h, famTarget(container, f), f.Snaps, w)...)
 	lines = append(lines, "")
 	show := f.Snaps
 	if len(show) > 8 {

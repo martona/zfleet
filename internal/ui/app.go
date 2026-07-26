@@ -32,12 +32,17 @@ type Model struct {
 
 	w, h int
 	mode int
-	br   browserState
 
 	// tree screen state
-	treeSel      string          // row id: "≡", "h:<host>", "p:<host>\x00<pool>", or "<host>\x00<dataset>"
-	expanded     map[string]bool // same id scheme
+	treeSel      string          // row id: "≡", "h:<host>", "p:<host>\x00<pool>", or "<host>\x00<dataset>[@snap]"
+	expanded     map[string]bool // same id scheme (families: "f:<host>\x00<ds>\x00<label>")
+	snapsShown   map[string]bool // dataset row ids whose snapshots are t-toggled into the tree
 	treeSortUsed bool
+
+	// snapshot marks: one dataset's worth at a time, for the reclaim math
+	marks     map[string]bool // snap short names
+	markOwner string          // dataset row id owning the marks
+	markGen   int             // bumped per change; debounces the dry-run
 
 	perf    perfState
 	perfMem map[string]string // per-host remembered perf pool
@@ -55,9 +60,10 @@ type Model struct {
 func New(specs []HostSpec, multiHost bool) *Model {
 	m := &Model{
 		multiHost:    multiHost,
-		br:           newBrowserState(nil, ""),
 		treeSortUsed: true,
 		expanded:     map[string]bool{},
+		snapsShown:   map[string]bool{},
+		marks:        map[string]bool{},
 		perfMem:      map[string]string{},
 		fleetW:       map[string]int{},
 	}
@@ -451,9 +457,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			h.dsTrees[msg.pool] = zfs.ParseDatasets(msg.text)
 		}
-		if m.mode == modeBrowser {
-			return m, m.brEnsure()
-		}
 		return m, m.treeEnsure()
 
 	case snapsMsg:
@@ -481,9 +484,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			pool string
 		}
 		need := map[needKey]bool{}
-		if m.mode == modeBrowser && m.br.host != nil && m.br.pool != "" {
-			need[needKey{m.br.host, m.br.pool}] = true
-		}
 		for id := range m.expanded {
 			if h, pool, ok := splitPoolID(m, id); ok {
 				need[needKey{h, pool}] = true
@@ -495,17 +495,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, fetchDatasets(k.h, k.pool))
 			}
 		}
-		if m.mode == modeBrowser && m.br.host != nil {
-			if c := m.brContainer(); c != nil && !m.br.host.dsSnapsPend[c.Name] {
-				m.br.host.dsSnapsPend[c.Name] = true
-				cmds = append(cmds, fetchSnaps(m.br.host, c.Name))
+		// t-toggled snapshot lists stay live too — the toggle set is the
+		// user's explicit interest, so it bounds the refresh cost
+		for id := range m.snapsShown {
+			i := strings.IndexByte(id, 0)
+			if i < 0 {
+				continue
 			}
+			h, ds := m.hostByName(id[:i]), id[i+1:]
+			if h == nil || h.conn == connDown || h.dsSnapsPend[ds] {
+				continue
+			}
+			h.dsSnapsPend[ds] = true
+			cmds = append(cmds, fetchSnaps(h, ds))
 		}
 		return m, tea.Batch(cmds...)
 
 	case dryTickMsg:
-		if msg.gen == m.br.selGen && len(m.br.selSnaps) > 0 {
-			return m, m.ensureDryCmd(m.SelectionTarget())
+		if msg.gen == m.markGen && len(m.marks) > 0 {
+			h, _ := m.markHostDs()
+			return m, m.ensureDryCmd(h, m.MarkTarget())
 		}
 		return m, nil
 
@@ -536,11 +545,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modePerf:
 			return m.perfKeys(msg)
-		case modeBrowser:
-			if msg.String() == "p" && !m.br.filterIn {
-				return m, m.enterPerf()
-			}
-			return m.browserKeys(msg)
 		default:
 			if msg.String() == "p" {
 				return m, m.enterPerf()
@@ -549,17 +553,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
-}
-
-// MarkSnaps selects snapshots on the current browser level (dump helper).
-func (m *Model) MarkSnaps(names []string) {
-	for _, n := range names {
-		n = strings.TrimSpace(strings.TrimPrefix(n, "@"))
-		if n != "" {
-			m.br.selSnaps[n] = true
-		}
-	}
-	m.br.selGen++
 }
 
 // ApplyDryRun stores a dry-run result for a target (dump helper).

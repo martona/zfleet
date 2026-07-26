@@ -35,46 +35,21 @@ func (m *Model) cheatBase() []keyHint {
 		}
 		return append(hints, keyHint{"esc", "back"}, keyHint{"q", "quit"})
 
-	case modeBrowser:
-		if m.br.filterIn {
-			return []keyHint{{"", "type to filter…"}, {"enter", "keep"}, {"esc", "cancel"}}
-		}
-		if len(m.br.selSnaps) > 0 {
-			return []keyHint{{"space", "toggle"}, {"esc", "clear"}, {"bksp", "up"}, {"q", "quit"}}
-		}
-		var head []keyHint
-		switch sel := m.brSelected(); sel.kind {
-		case eSelf, eHostSelf:
-			head = []keyHint{{"enter", "up"}}
-		case eChild, ePool:
-			head = []keyHint{{"enter", "open"}}
-		case eFam:
-			label := "unfold"
-			if c := m.brContainer(); c != nil && m.br.expFams[c.Name+"\x00"+sel.fam.Label()] {
-				label = "fold"
-			}
-			head = []keyHint{{"enter", label}, {"space", "select"}}
-		case eSnap:
-			head = []keyHint{{"space", "select"}}
-		}
-		return append(head, keyHint{"bksp", "up"}, keyHint{"/", "filter"},
-			keyHint{"s", "sort"}, keyHint{"p", "perf"}, keyHint{"q", "quit"})
-
 	default: // tree screen
 		row := m.treeSelected()
+		if len(m.marks) > 0 && (row.id == m.markOwner || row.parentID == m.markOwner) {
+			return []keyHint{{"space", "toggle"}, {"esc", "clear"}, {"q", "quit"}}
+		}
 		var head []keyHint
 		switch row.kind {
 		case rOverview:
 			head = []keyHint{{"↓", "browse"}}
-		case rHost:
-			head = []keyHint{{"enter", "browse"}}
 		case rPool:
 			if row.expanded {
 				head = append(head, keyHint{"←", "collapse"})
 			} else {
 				head = append(head, keyHint{"→", "expand"})
 			}
-			head = append(head, keyHint{"enter", "drill"})
 		case rDataset:
 			switch {
 			case row.expanded:
@@ -84,7 +59,22 @@ func (m *Model) cheatBase() []keyHint {
 			default:
 				head = append(head, keyHint{"←", "parent"})
 			}
-			head = append(head, keyHint{"enter", "drill"})
+			if s, ok := row.host.dsSnaps[row.ds.Name]; !ok || len(s) > 0 {
+				label := "snaps"
+				if m.snapsShown[row.id] {
+					label = "hide snaps"
+				}
+				head = append(head, keyHint{"t", label})
+			}
+		case rFam:
+			if row.expanded {
+				head = append(head, keyHint{"←", "fold"})
+			} else {
+				head = append(head, keyHint{"→", "unfold"})
+			}
+			head = append(head, keyHint{"space", "select"})
+		case rSnap:
+			head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
 		}
 		return append(head, keyHint{"s", "sort"}, keyHint{"p", "perf"}, keyHint{"q", "quit"})
 	}

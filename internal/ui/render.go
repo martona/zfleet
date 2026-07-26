@@ -104,64 +104,47 @@ func frame(m *Model) string {
 		return b.String()
 	}
 
-	var leftW int
-	if m.mode == modeBrowser {
-		leftW = 46
-		if leftW > m.w*45/100 {
-			leftW = m.w * 45 / 100
-		}
-	} else {
-		// the tree's divider sits exactly where the overview's io columns
-		// begin: same rows, same geometry, no shift on mode change. It
-		// moves only when expansion changes what is visible.
-		leftW = m.treeLeftWidth()
-		if leftW > m.w/2 {
-			leftW = m.w / 2
-		}
+	// the tree's divider sits exactly where the overview's io columns
+	// begin: same rows, same geometry, no shift on mode change. It
+	// moves only when expansion changes what is visible.
+	leftW := m.treeLeftWidth()
+	if leftW > m.w/2 {
+		leftW = m.w / 2
 	}
 	rightW := m.w - leftW - 3
 
-	var leftTitle, rightTitle string
-	var left, right []string
-	var panelKey string
-	if m.mode == modeBrowser {
-		leftTitle = m.breadcrumb()
-		bsel := m.brSelected()
-		rightTitle = brRightTitle(m, bsel)
-		if n := len(m.br.selSnaps); n > 0 {
-			rightTitle = fmt.Sprintf("selection (%d)", n)
-		}
-		left = brLeftPane(m, leftW, contentH)
-		right = brInspector(m, bsel, rightW)
-		container := ""
-		if c := m.brContainer(); c != nil {
-			container = c.Name
-		}
-		host := ""
-		if m.br.host != nil {
-			host = m.br.host.name
-		}
-		panelKey = fmt.Sprintf("b|%s|%s|%s|%d", host, container, bsel.id, m.br.selGen)
-	} else {
-		row := m.treeSelected()
-		leftTitle = "pools"
-		if m.multiHost {
-			leftTitle = "hosts"
-		}
-		left = treeNarrowPane(m, leftW, contentH)
-		switch row.kind {
-		case rHost:
-			rightTitle = row.host.name
-			right = hostInspector(m, row.host, rightW)
-		case rPool:
-			rightTitle = row.pool.Name
-			right = inspector(m, row.host, row.pool, rightW)
-		case rDataset:
-			rightTitle = row.ds.Base()
-			right = dsInspector(m, row.host, row.ds, rightW)
-		}
-		panelKey = "t|" + m.treeSel
+	row := m.treeSelected()
+	leftTitle := "pools"
+	if m.multiHost {
+		leftTitle = "hosts"
 	}
+	var rightTitle string
+	var right []string
+	left := treeNarrowPane(m, leftW, contentH)
+	switch row.kind {
+	case rHost:
+		rightTitle = row.host.name
+		right = hostInspector(m, row.host, rightW)
+	case rPool:
+		rightTitle = row.pool.Name
+		right = inspector(m, row.host, row.pool, rightW)
+	case rDataset:
+		rightTitle = row.ds.Base()
+		right = dsInspector(m, row.host, row.ds, rightW)
+	case rFam:
+		rightTitle = "@" + row.fam.Label()
+		right = famInspector(m, row.host, row.ds.Name, row.fam, rightW)
+	case rSnap:
+		rightTitle = "@" + row.snap.Snap
+		right = snapInspector(m, row.snap)
+	}
+	// while the cursor stays in the marks' home dataset, the panel answers
+	// for the selection as a whole
+	if len(m.marks) > 0 && (row.id == m.markOwner || row.parentID == m.markOwner) {
+		rightTitle = fmt.Sprintf("selection (%d)", len(m.markedSnaps()))
+		right = selInspector(m, rightW)
+	}
+	panelKey := fmt.Sprintf("t|%s|%d", m.treeSel, m.markGen)
 	if panelKey != m.panelKey {
 		m.panelKey, m.panelScroll = panelKey, 0
 	}
@@ -483,10 +466,6 @@ func (m *Model) stripHost() *hostState {
 	case modePerf:
 		if m.perf.host != nil {
 			return m.perf.host
-		}
-	case modeBrowser:
-		if m.br.host != nil {
-			return m.br.host
 		}
 	default:
 		if row := m.treeSelected(); row.host != nil {
