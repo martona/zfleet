@@ -71,6 +71,9 @@ func frame(m *Model) string {
 		inner := m.w - 2
 		var lines []string
 		heading := "overview"
+		if ft := m.filterTitle(); ft != "" && m.mode == modePools {
+			heading = ft
+		}
 		if m.mode == modePerf {
 			heading = "performance · " + m.perf.pool
 			if m.multiHost && m.perf.host != nil {
@@ -118,6 +121,9 @@ func frame(m *Model) string {
 	if m.multiHost {
 		leftTitle = "hosts"
 	}
+	if ft := m.filterTitle(); ft != "" {
+		leftTitle = ft
+	}
 	var rightTitle string
 	var right []string
 	left := treeNarrowPane(m, leftW, contentH)
@@ -137,6 +143,16 @@ func frame(m *Model) string {
 	case rSnap:
 		rightTitle = "@" + row.snap.Snap
 		right = snapInspector(m, row.snap)
+	case rPending:
+		// the wait row answers with its parent's inspector — the data you
+		// already have, while the rest arrives
+		if row.pool != nil {
+			rightTitle = row.pool.Name
+			right = inspector(m, row.host, row.pool, rightW)
+		} else if row.ds != nil {
+			rightTitle = row.ds.Base()
+			right = dsInspector(m, row.host, row.ds, rightW)
+		}
 	}
 	// while the cursor stays in the marks' home dataset, the panel answers
 	// for the selection as a whole
@@ -457,6 +473,25 @@ func opsCell(bw, ops int64) string {
 		return "<1 ops/s"
 	}
 	return zfs.NiceCount(ops) + " ops/s"
+}
+
+// filterTitle renders the active filter's pane title: pattern, input
+// cursor, live match count, sweep progress. Empty when no filter is up.
+func (m *Model) filterTitle() string {
+	if !m.filterIn && m.filter == "" {
+		return ""
+	}
+	t := "/" + m.filter
+	if m.filterIn {
+		t += "▏"
+	}
+	if m.filter != "" {
+		t += fmt.Sprintf(" · %d", m.filterHits(m.treeRows()))
+	}
+	if k := m.sweepPending(); k > 0 {
+		t += fmt.Sprintf(" · sweeping %d", k)
+	}
+	return t
 }
 
 // stripHost resolves which host the vitals strip should reflect: the one

@@ -194,6 +194,10 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 		if onCur {
 			return styInv.Render(lead + used)
 		}
+		if m.filter != "" && !r.hit {
+			// structural ancestor of a match — the path, not the prize
+			return styDim.Render(lead + used)
+		}
 		return lead + dimUnit(used)
 
 	case rFam:
@@ -230,8 +234,22 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 			return styInv.Render(lead + used)
 		case markCh == "*":
 			return styWarn.Render(lead + used)
+		case r.hit:
+			// a filter match is the prize — full brightness among dim paths
+			return lead + dimUnit(used)
 		}
 		return styDim.Render(lead + used)
+
+	case rPending:
+		label := "collecting datasets…"
+		if r.ds != nil {
+			label = "collecting snapshots…"
+		}
+		body := padR(rep("  ", ind+r.depth)+"  "+label, nameW+treeColsW)
+		if onCur {
+			return styInv.Render(body)
+		}
+		return styDim.Render(body)
 	}
 	return ""
 }

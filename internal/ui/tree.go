@@ -28,6 +28,7 @@ const (
 	rDataset
 	rFam
 	rSnap
+	rPending // data in flight — the row that keeps Enter feeling instant
 )
 
 type treeRow struct {
@@ -38,6 +39,7 @@ type treeRow struct {
 	fam        *zfs.SnapFamily
 	snap       *zfs.Snapshot
 	member     bool // snapshot scattered from an unfolded family
+	hit        bool // filter views: a genuine match, not a structural ancestor
 	depth      int  // dataset rows: 1 = root dataset; snap rows: owner depth + 1
 	id         string
 	parentID   string
@@ -73,6 +75,9 @@ func splitPoolID(m *Model, id string) (*hostState, string, bool) {
 }
 
 func (m *Model) treeRows() []treeRow {
+	if m.filter != "" {
+		return m.filterRows()
+	}
 	rows := []treeRow{{kind: rOverview, id: overviewID}}
 	for _, h := range m.hosts {
 		if m.multiHost {
@@ -93,7 +98,11 @@ func (m *Model) treeRows() []treeRow {
 			}
 			tree := h.dsTrees[p.Name]
 			if tree == nil {
-				continue // fetch in flight; rows appear when it lands
+				// fetch in flight — answer the keypress NOW, swap in the
+				// real rows when the data lands
+				rows = append(rows, treeRow{kind: rPending, host: h, pool: p,
+					depth: 1, id: "w:" + pid, parentID: pid})
+				continue
 			}
 			root := tree.ByName[p.Name]
 			if root == nil {
@@ -114,7 +123,12 @@ func (m *Model) treeRows() []treeRow {
 				// toggled them on, so they appear right under it, above any
 				// descent into children
 				if m.snapsShown[id] {
-					rows = append(rows, m.snapRows(h, d, depth+1, id)...)
+					if _, ok := h.dsSnaps[d.Name]; ok {
+						rows = append(rows, m.snapRows(h, d, depth+1, id)...)
+					} else {
+						rows = append(rows, treeRow{kind: rPending, host: h, ds: d,
+							depth: depth + 1, id: "w:" + id, parentID: id})
+					}
 				}
 				kids := append([]*zfs.Dataset(nil), d.Children...)
 				if m.treeSortUsed {
@@ -130,6 +144,101 @@ func (m *Model) treeRows() []treeRow {
 		}
 	}
 	return rows
+}
+
+// filterRows is the tree pruned to the active filter: hosts stay as
+// anchors, the path to each match stays as dim structure, matches render
+// bright, everything else is gone. Matching snapshots appear flat —
+// search results are a set, not a browse.
+//
+// The ds part addresses dataset NAMES — the tree already shows lineage, so
+// a child silently inheriting its parent's path is not a match. Typing a
+// '/' in the pattern is the explicit switch to full-path matching
+// ("rust/recv/*@x" scopes a subtree on purpose).
+func (m *Model) filterRows() []treeRow {
+	dsPat, snapPat, hasSnap := splitFilter(m.filter)
+	dsByPath := strings.Contains(dsPat, "/")
+	rows := []treeRow{{kind: rOverview, id: overviewID}}
+	for _, h := range m.hosts {
+		if m.multiHost {
+			rows = append(rows, treeRow{kind: rHost, host: h, id: treeHostID(h)})
+		}
+		for _, p := range h.pools {
+			tree := h.dsTrees[p.Name]
+			if tree == nil {
+				continue // sweep in flight; the title carries the count
+			}
+			root := tree.ByName[p.Name]
+			if root == nil {
+				continue
+			}
+			pid := treePoolID(h, p.Name)
+			parent := ""
+			if m.multiHost {
+				parent = treeHostID(h)
+			}
+			var walk func(d *zfs.Dataset, depth int, parentID string) []treeRow
+			walk = func(d *zfs.Dataset, depth int, parentID string) []treeRow {
+				id := treeDsID(h, d.Name)
+				target := d.Base()
+				if dsByPath {
+					target = d.Name
+				}
+				hit := filterMatch(target, dsPat)
+				var snaps []*zfs.Snapshot
+				if hasSnap && hit {
+					for _, s := range h.dsSnaps[d.Name] {
+						if filterMatch(s.Snap, snapPat) {
+							snaps = append(snaps, s)
+						}
+					}
+					hit = len(snaps) > 0
+				}
+				kids := append([]*zfs.Dataset(nil), d.Children...)
+				if m.treeSortUsed {
+					sort.SliceStable(kids, func(i, j int) bool { return kids[i].Used > kids[j].Used })
+				} else {
+					sort.SliceStable(kids, func(i, j int) bool { return kids[i].Name < kids[j].Name })
+				}
+				var kidRows []treeRow
+				for _, k := range kids {
+					kidRows = append(kidRows, walk(k, depth+1, id)...)
+				}
+				if !hit && len(kidRows) == 0 {
+					return nil
+				}
+				out := []treeRow{{kind: rDataset, host: h, ds: d, depth: depth,
+					id: id, parentID: parentID, hit: hit}}
+				for _, s := range snaps {
+					out = append(out, treeRow{kind: rSnap, host: h, ds: d, snap: s,
+						hit: true, depth: depth + 1,
+						id: treeDsID(h, d.Name+"@"+s.Snap), parentID: id})
+				}
+				return append(out, kidRows...)
+			}
+			dsRows := walk(root, 1, pid)
+			if len(dsRows) == 0 {
+				continue
+			}
+			rows = append(rows, treeRow{kind: rPool, host: h, pool: p,
+				id: pid, parentID: parent, hit: true})
+			rows = append(rows, dsRows...)
+		}
+	}
+	return rows
+}
+
+// filterHits counts the matches the title reports: snapshots when the
+// pattern hunts snapshots, datasets otherwise.
+func (m *Model) filterHits(rows []treeRow) int {
+	_, _, hasSnap := splitFilter(m.filter)
+	n := 0
+	for _, r := range rows {
+		if r.hit && ((hasSnap && r.kind == rSnap) || (!hasSnap && r.kind == rDataset)) {
+			n++
+		}
+	}
+	return n
 }
 
 // snapRows builds a dataset's snapshot rows. Strictly chronological: a
@@ -178,6 +287,15 @@ func (m *Model) treeIdx(rows []treeRow) int {
 	for i, r := range rows {
 		if r.id == m.treeSel {
 			return i
+		}
+	}
+	// a pending row resolved into real rows — land on its parent, not on
+	// the overview
+	if want := strings.TrimPrefix(m.treeSel, "w:"); want != m.treeSel {
+		for i, r := range rows {
+			if r.id == want {
+				return i
+			}
 		}
 	}
 	return 0
@@ -257,9 +375,33 @@ func (m *Model) toggleSnapsShown() (tea.Cmd, bool) {
 }
 
 func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.filterIn {
+		switch msg.String() {
+		case "esc":
+			m.filter, m.filterIn = "", false
+		case "enter":
+			m.filterIn = false
+			if m.filter == "" {
+				break
+			}
+		case "backspace":
+			if r := []rune(m.filter); len(r) > 0 {
+				m.filter = string(r[:len(r)-1])
+			}
+		default:
+			if msg.Type == tea.KeyRunes || msg.String() == " " {
+				m.filter += msg.String()
+			}
+		}
+		return m, m.ensureFilterCmd()
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "/":
+		m.filterIn = true
+		return m, m.ensureFilterCmd()
 	case "down":
 		m.treeMove(1)
 	case "up":
@@ -275,6 +417,9 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.treeSel = rows[len(rows)-1].id
 		}
 	case "right", "l", "enter":
+		if m.filter != "" {
+			break // the filter owns the structure; navigate or esc out
+		}
 		row := m.treeSelected()
 		if row.expandable && !row.expanded {
 			m.expanded[row.id] = true
@@ -283,6 +428,9 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "left", "h":
+		if m.filter != "" {
+			break
+		}
 		row := m.treeSelected()
 		switch {
 		case row.expanded:
@@ -291,6 +439,9 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.treeSel = row.parentID
 		}
 	case "t":
+		if m.filter != "" {
+			break
+		}
 		if cmd, ok := m.toggleSnapsShown(); ok {
 			return m, cmd
 		}
@@ -305,7 +456,20 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
 		}
 	case "esc":
-		m.clearMarks()
+		switch {
+		case len(m.marks) > 0:
+			m.clearMarks()
+		case m.filter != "":
+			// land where the hunt ended: unfold the real tree down to the
+			// row under the cursor before dropping the filter
+			if row := m.treeSelected(); row.kind == rDataset || row.kind == rSnap {
+				m.ExpandFor(row.host.name, row.ds.Name)
+				if row.kind == rSnap {
+					m.snapsShown[treeDsID(row.host, row.ds.Name)] = true
+				}
+			}
+			m.filter = ""
+		}
 	case "s":
 		m.treeSortUsed = !m.treeSortUsed
 	}

@@ -44,6 +44,10 @@ type Model struct {
 	markOwner string          // dataset row id owning the marks
 	markGen   int             // bumped per change; debounces the dry-run
 
+	// the / filter: pattern "ds[@snap]"; active whenever filter != ""
+	filter   string
+	filterIn bool // input mode — keystrokes edit the pattern
+
 	perf    perfState
 	perfMem map[string]string // per-host remembered perf pool
 
@@ -509,6 +513,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.dsSnapsPend[ds] = true
 			cmds = append(cmds, fetchSnaps(h, ds))
 		}
+		// an active hunt keeps its results fresh (TTL-gated)
+		if m.filter != "" {
+			cmds = append(cmds, m.ensureFilterCmd())
+		}
 		return m, tea.Batch(cmds...)
 
 	case dryTickMsg:
@@ -530,6 +538,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case sweepMsg:
+		if h := m.hostByName(msg.host); h != nil {
+			if msg.err == nil {
+				m.ApplySweep(msg.host, msg.pool, msg.text)
+			} else {
+				// stamp the TTL anyway so a failing pool is not hammered on
+				// every keystroke
+				h.snapSweepAt[msg.pool] = time.Now()
+				delete(h.snapSweepPend, msg.pool)
+			}
+		}
+		return m, nil
+
 	case perfMsg:
 		m.applyPerf(msg)
 		return m, nil
@@ -546,7 +567,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modePerf:
 			return m.perfKeys(msg)
 		default:
-			if msg.String() == "p" {
+			if msg.String() == "p" && !m.filterIn {
 				return m, m.enterPerf()
 			}
 			return m.treeKeys(msg)

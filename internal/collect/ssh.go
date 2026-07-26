@@ -152,6 +152,10 @@ func (s Ssh) SnapshotTexts(ctx context.Context, ds string) (string, error) {
 	return s.run(ctx, "zfs list -Hp -d 1 -t snapshot -s creation -o "+zfs.SnapshotFields+" "+quote(ds))
 }
 
+func (s Ssh) PoolSnapshotTexts(ctx context.Context, pool string) (string, error) {
+	return s.run(ctx, "zfs list -Hp -r -t snapshot -s creation -o "+zfs.SnapshotFields+" "+quote(pool))
+}
+
 func (s Ssh) PropTexts(ctx context.Context, ds string) (string, error) {
 	return s.run(ctx, "zfs get -Hp all "+quote(ds))
 }

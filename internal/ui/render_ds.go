@@ -12,6 +12,12 @@ import (
 // Right-panel inspectors for datasets, snapshots, snapshot families, and
 // the mark selection. All of them render into the tree's two-pane frame.
 
+// keyChip renders an inline hotkey hint in the cheat line's idiom —
+// inverted key, plain label.
+func keyChip(key, label string) string {
+	return styInv.Render(" "+key+" ") + " " + label
+}
+
 // reclaimLines renders the dry-run verdict for a target: the verbatim
 // "would reclaim" line once known, the Σ lower bound only until then.
 func reclaimLines(h *hostState, target string, snaps []*zfs.Snapshot, w int) []string {
@@ -45,9 +51,10 @@ func reclaimLines(h *hostState, target string, snaps []*zfs.Snapshot, w int) []s
 	}
 }
 
-// snapTable is the shared member ledger — name, used, wrote — one view for
-// collapsed families and hand-picked selections alike. The wrote column
-// only exists when the capture carries it.
+// snapTable is the shared member ledger — name, used, wrote, refer — one
+// view for collapsed families and hand-picked selections alike. The wrote
+// column only exists when the capture carries it; the column order follows
+// the snapshot card (used, written, refer).
 func snapTable(snaps []*zfs.Snapshot, w int) []string {
 	haveW := false
 	// the name column hugs its longest occupant — numbers read next to
@@ -61,7 +68,7 @@ func snapTable(snaps []*zfs.Snapshot, w int) []string {
 			nameW = n
 		}
 	}
-	max := w - 2 - 9
+	max := w - 2 - 9 - 10
 	if haveW {
 		max -= 10
 	}
@@ -72,6 +79,7 @@ func snapTable(snaps []*zfs.Snapshot, w int) []string {
 	if haveW {
 		head += styDim.Render(padL("WROTE", 10))
 	}
+	head += styDim.Render(padL("REFER", 10))
 	lines := []string{head}
 	for _, s := range snaps {
 		row := " " + styDim.Render(padR(truncate("@"+s.Snap, nameW), nameW)) +
@@ -83,6 +91,7 @@ func snapTable(snaps []*zfs.Snapshot, w int) []string {
 			}
 			row += dimUnit(padL(wv, 10))
 		}
+		row += dimUnit(padL(zfs.NiceBytes(s.Refer), 10))
 		lines = append(lines, row)
 	}
 	return lines
@@ -106,7 +115,8 @@ func selInspector(m *Model, w int) []string {
 		show = show[len(show)-12:]
 	}
 	lines = append(lines, snapTable(show, w)...)
-	lines = append(lines, "", " "+styDim.Render("space: toggle · esc: clear"))
+	lines = append(lines, "",
+		" "+keyChip("space", "toggle")+styDim.Render(" · ")+keyChip("esc", "clear"))
 	return lines
 }
 
@@ -343,11 +353,11 @@ func dsInspector(m *Model, h *hostState, d *zfs.Dataset, w int) []string {
 					zfs.NiceBytes(shared)+" shared across snapshots"))
 			}
 			// the toggle that replaced the old browse mode — loud on purpose
-			hint := " show snapshots in the tree"
+			hint := "show snapshots in the tree"
 			if m.snapsShown[treeDsID(h, d.Name)] {
-				hint = " hide snapshots"
+				hint = "hide snapshots"
 			}
-			lines = append(lines, " "+styInv.Render(" t ")+hint)
+			lines = append(lines, " "+keyChip("t", hint))
 		}
 	} else {
 		lines = append(lines, " "+styDim.Render("snaps …"))
@@ -377,7 +387,9 @@ func snapInspector(m *Model, s *zfs.Snapshot) []string {
 	return append(lines,
 		val("refer", s.Refer, "data referenced by this snapshot"),
 		"",
-		" "+padR("created", 8)+absDate(s.Creation)+" "+styDim.Render("("+relAge(s.Creation)+")"))
+		" "+padR("created", 8)+absDate(s.Creation)+" "+styDim.Render("("+relAge(s.Creation)+")"),
+		"",
+		" "+keyChip("space", "select for analysis"))
 }
 
 func famInspector(m *Model, h *hostState, container string, f *zfs.SnapFamily, w int) []string {
@@ -395,6 +407,7 @@ func famInspector(m *Model, h *hostState, container string, f *zfs.SnapFamily, w
 	}
 	// scanning the wrote column is how you find the epoch that ate the pool
 	lines = append(lines, snapTable(show, w)...)
+	lines = append(lines, "", " "+keyChip("space", "select family for analysis"))
 	return lines
 }
 

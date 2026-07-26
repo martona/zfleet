@@ -29,6 +29,10 @@ type Source interface {
 	// SnapshotTexts returns snapshot list output covering at least the
 	// given dataset's own snapshots.
 	SnapshotTexts(ctx context.Context, ds string) (string, error)
+	// PoolSnapshotTexts returns snapshot list output covering at least the
+	// whole pool, recursively — one command per pool is what makes the
+	// fleet-wide snapshot sweep affordable.
+	PoolSnapshotTexts(ctx context.Context, pool string) (string, error)
 	// PropTexts returns `zfs get -Hp all` output for the dataset (or a
 	// superset; "" when unavailable).
 	PropTexts(ctx context.Context, ds string) (string, error)
@@ -111,6 +115,12 @@ func (Exec) DatasetTexts(ctx context.Context, pool string) (string, error) {
 func (Exec) SnapshotTexts(ctx context.Context, ds string) (string, error) {
 	out, err := exec.CommandContext(ctx, "zfs", "list", "-Hp", "-d", "1",
 		"-t", "snapshot", "-s", "creation", "-o", zfs.SnapshotFields, ds).Output()
+	return string(out), err
+}
+
+func (Exec) PoolSnapshotTexts(ctx context.Context, pool string) (string, error) {
+	out, err := exec.CommandContext(ctx, "zfs", "list", "-Hp", "-r",
+		"-t", "snapshot", "-s", "creation", "-o", zfs.SnapshotFields, pool).Output()
 	return string(out), err
 }
 
@@ -275,6 +285,10 @@ func (r Replay) DatasetTexts(context.Context, string) (string, error) {
 }
 
 func (r Replay) SnapshotTexts(context.Context, string) (string, error) {
+	return r.read("zfs-list-snapshots.out")
+}
+
+func (r Replay) PoolSnapshotTexts(context.Context, string) (string, error) {
 	return r.read("zfs-list-snapshots.out")
 }
 

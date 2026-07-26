@@ -36,9 +36,20 @@ func (m *Model) cheatBase() []keyHint {
 		return append(hints, keyHint{"esc", "back"}, keyHint{"q", "quit"})
 
 	default: // tree screen
+		if m.filterIn {
+			return []keyHint{{"", "type to filter…"}, {"enter", "keep"}, {"esc", "cancel"}}
+		}
 		row := m.treeSelected()
 		if len(m.marks) > 0 && (row.id == m.markOwner || row.parentID == m.markOwner) {
 			return []keyHint{{"space", "toggle"}, {"esc", "clear"}, {"q", "quit"}}
+		}
+		if m.filter != "" {
+			head := []keyHint{{"esc", "clear filter"}}
+			if row.kind == rSnap {
+				head = append(head, keyHint{"space", "select"})
+			}
+			return append(head, keyHint{"/", "filter"}, keyHint{"s", "sort"},
+				keyHint{"p", "perf"}, keyHint{"q", "quit"})
 		}
 		var head []keyHint
 		switch row.kind {
@@ -76,7 +87,8 @@ func (m *Model) cheatBase() []keyHint {
 		case rSnap:
 			head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
 		}
-		return append(head, keyHint{"s", "sort"}, keyHint{"p", "perf"}, keyHint{"q", "quit"})
+		return append(head, keyHint{"/", "filter"}, keyHint{"s", "sort"},
+			keyHint{"p", "perf"}, keyHint{"q", "quit"})
 	}
 }
 

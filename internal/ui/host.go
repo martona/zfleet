@@ -110,6 +110,11 @@ type hostState struct {
 	dsPropsPend map[string]bool
 	dryCache    map[string]*dryResult
 
+	// fleet-sweep bookkeeping (the / filter): per-pool recursive snapshot
+	// fetches, TTL-cached so retyping narrows in memory
+	snapSweepAt   map[string]time.Time
+	snapSweepPend map[string]bool
+
 	// grow-only readout widths; ioW is per-pool (reset on selection
 	// change), stripW lives for the session
 	ioW    map[string]int
@@ -118,25 +123,27 @@ type hostState struct {
 
 func newHostState(name, dest string, src collect.Source) *hostState {
 	return &hostState{
-		name:        name,
-		dest:        dest,
-		src:         src,
-		cpuPct:      -1,
-		rootStats:   map[string]zfs.RootStat{},
-		ashift:      map[string]int{},
-		io:          map[string]zfs.IORates{},
-		ioHist:      map[string][]zfs.IORates{},
-		dsIO:        map[string]zfs.IORates{},
-		dsIOHist:    map[string][]zfs.IORates{},
-		dsTrees:     map[string]*zfs.DatasetTree{},
-		dsTreesPend: map[string]bool{},
-		dsSnaps:     map[string][]*zfs.Snapshot{},
-		dsSnapsPend: map[string]bool{},
-		dsProps:     map[string]map[string]zfs.Prop{},
-		dsPropsPend: map[string]bool{},
-		dryCache:    map[string]*dryResult{},
-		ioW:         map[string]int{},
-		stripW:      map[string]int{},
+		name:          name,
+		dest:          dest,
+		src:           src,
+		cpuPct:        -1,
+		rootStats:     map[string]zfs.RootStat{},
+		ashift:        map[string]int{},
+		io:            map[string]zfs.IORates{},
+		ioHist:        map[string][]zfs.IORates{},
+		dsIO:          map[string]zfs.IORates{},
+		dsIOHist:      map[string][]zfs.IORates{},
+		dsTrees:       map[string]*zfs.DatasetTree{},
+		dsTreesPend:   map[string]bool{},
+		dsSnaps:       map[string][]*zfs.Snapshot{},
+		dsSnapsPend:   map[string]bool{},
+		dsProps:       map[string]map[string]zfs.Prop{},
+		dsPropsPend:   map[string]bool{},
+		dryCache:      map[string]*dryResult{},
+		snapSweepAt:   map[string]time.Time{},
+		snapSweepPend: map[string]bool{},
+		ioW:           map[string]int{},
+		stripW:        map[string]int{},
 	}
 }
 

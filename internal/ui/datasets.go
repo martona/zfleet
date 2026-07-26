@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"path"
 	"strings"
 	"time"
 
@@ -157,6 +158,80 @@ func (m *Model) markDebounce() tea.Cmd {
 	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dryTickMsg{gen: gen} })
 }
 
+// The `/` filter: one gesture, progressive reach. It prunes what is loaded
+// instantly, and — because pool-recursive listing makes the fleet's whole
+// snapshot universe a dozen-odd commands — it also sweeps what isn't,
+// streaming matches in as each pool reports.
+
+// sweepTTL bounds re-fetching during a hunt: retyping narrows in memory,
+// a fresh sweep happens only when the data has had time to go stale.
+const sweepTTL = time.Minute
+
+// splitFilter parses the pattern grammar, which mirrors zfs naming:
+// "ds@snap" — dataset part and snapshot part; a bare "@..." hunts snaps on
+// any dataset; no "@" filters dataset/pool names only (no snapshot cost).
+func splitFilter(pat string) (dsPat, snapPat string, hasSnap bool) {
+	if i := strings.IndexByte(pat, '@'); i >= 0 {
+		return pat[:i], pat[i+1:], true
+	}
+	return pat, "", false
+}
+
+// filterMatch is case-insensitive substring, or an anchored glob when the
+// pattern carries metacharacters — families display as globs, so globs
+// must just work.
+func filterMatch(name, pat string) bool {
+	if pat == "" {
+		return true
+	}
+	name, pat = strings.ToLower(name), strings.ToLower(pat)
+	if strings.ContainsAny(pat, "*?[") {
+		ok, err := path.Match(pat, name)
+		return err == nil && ok
+	}
+	return strings.Contains(name, pat)
+}
+
+// ensureFilterCmd fans out whatever the active filter is missing: every
+// live pool's dataset tree, plus the pool-recursive snapshot sweep when
+// the pattern hunts snapshots.
+func (m *Model) ensureFilterCmd() tea.Cmd {
+	if m.filter == "" && !m.filterIn {
+		return nil
+	}
+	_, _, hasSnap := splitFilter(m.filter)
+	var cmds []tea.Cmd
+	for _, h := range m.hosts {
+		if h.conn == connDown {
+			continue
+		}
+		for _, p := range h.pools {
+			cmds = append(cmds, m.ensureTreeCmd(h, p.Name))
+			if !hasSnap || h.snapSweepPend[p.Name] ||
+				time.Since(h.snapSweepAt[p.Name]) < sweepTTL {
+				continue
+			}
+			h.snapSweepPend[p.Name] = true
+			cmds = append(cmds, fetchSweep(h, p.Name))
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// sweepPending counts pools still owing the filter data — the "sweeping N"
+// note in the title.
+func (m *Model) sweepPending() int {
+	n := 0
+	for _, h := range m.hosts {
+		for _, p := range h.pools {
+			if h.dsTreesPend[p.Name] || h.snapSweepPend[p.Name] {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // lazy-fetch helpers
 
 func (m *Model) ensureTreeCmd(h *hostState, pool string) tea.Cmd {
@@ -230,6 +305,23 @@ type dryRunMsg struct {
 	text   string
 	err    error
 }
+type sweepMsg struct {
+	host string
+	pool string
+	text string
+	err  error
+}
+
+func fetchSweep(h *hostState, pool string) tea.Cmd {
+	host, src := h.name, h.src
+	return func() tea.Msg {
+		// snapshot-heavy pools take a beat; each pool streams in on its own
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		text, err := src.PoolSnapshotTexts(ctx, pool)
+		return sweepMsg{host: host, pool: pool, text: text, err: err}
+	}
+}
 
 func fetchDryRun(h *hostState, target string) tea.Cmd {
 	host, src := h.name, h.src
@@ -299,6 +391,23 @@ func (m *Model) ApplyProps(host, ds, text string) {
 		delete(h.dsPropsPend, ds)
 	}
 }
+
+// ApplySweep ingests one pool's recursive snapshot listing into the
+// per-dataset cache (also used by --dump).
+func (m *Model) ApplySweep(host, pool, text string) {
+	h := m.hostByName(host)
+	if h == nil {
+		return
+	}
+	for ds, snaps := range zfs.ParseAllSnapshots(text) {
+		h.dsSnaps[ds] = snaps
+	}
+	h.snapSweepAt[pool] = time.Now()
+	delete(h.snapSweepPend, pool)
+}
+
+// SetFilter activates the filter (dump helper).
+func (m *Model) SetFilter(pat string) { m.filter = pat }
 
 // ShowSnaps unfolds a dataset's snapshots into the tree — the `t` toggle,
 // ancestors included. A "@label" suffix also unfolds that family (dump

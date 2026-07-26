@@ -37,6 +37,7 @@ func main() {
 	cursor := flag.String("cursor", "", "visible row to move the --dump cursor to: @snap, @family label, dataset, pool, or host")
 	expand := flag.String("expand", "", "comma-separated [host:]pools/datasets to unfold for --dump tree views")
 	mark := flag.String("mark", "", "comma-separated snapshot names to mark within the single --snaps dataset (dump)")
+	filterFlag := flag.String("filter", "", "filter pattern for --dump: ds[@snap], substring or glob; sweeps the fleet like the live / key")
 	perf := flag.String("perf", "", "pool ([host:]pool) whose performance screen to render for --dump")
 	flag.Parse()
 
@@ -75,6 +76,7 @@ func main() {
 	if *dump {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
+		poolsOf := map[string][]string{}
 		for _, s := range specs {
 			status, list, err := s.Src.PoolTexts(ctx)
 			if err != nil {
@@ -85,6 +87,9 @@ func main() {
 			}
 			pools := zfs.ParseZpoolStatus(status)
 			zfs.AttachListNumbers(pools, list)
+			for _, p := range pools {
+				poolsOf[s.Name] = append(poolsOf[s.Name], p.Name)
+			}
 			m.ApplyPoolData(s.Name, pools)
 			roots, _ := s.Src.RootTexts(ctx)
 			poolProps, _ := s.Src.PoolProps(ctx)
@@ -175,6 +180,23 @@ func main() {
 					m.ApplyDryRun(lastHost, target, text, err)
 				}
 			}
+		}
+		if *filterFlag != "" {
+			// the live sweep, run synchronously: every pool's dataset tree,
+			// plus pool-recursive snapshots when the pattern hunts them
+			for _, s := range specs {
+				for _, pool := range poolsOf[s.Name] {
+					if dsText, err := s.Src.DatasetTexts(ctx, pool); err == nil {
+						m.ApplyDatasets(s.Name, pool, dsText)
+					}
+					if strings.Contains(*filterFlag, "@") {
+						if txt, err := s.Src.PoolSnapshotTexts(ctx, pool); err == nil {
+							m.ApplySweep(s.Name, pool, txt)
+						}
+					}
+				}
+			}
+			m.SetFilter(*filterFlag)
 		}
 		if *sel != "" {
 			host, name := hostFor(*sel)

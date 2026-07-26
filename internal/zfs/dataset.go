@@ -143,6 +143,37 @@ func ParseSnapshots(text, ds string) []*Snapshot {
 	return out
 }
 
+// ParseAllSnapshots groups a pool-recursive (or wider) snapshot listing by
+// container dataset, each list chronological — the fleet-sweep shape the
+// `/` filter feeds on.
+func ParseAllSnapshots(text string) map[string][]*Snapshot {
+	out := map[string][]*Snapshot{}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		f := strings.Split(line, "\t")
+		if len(f) < 4 {
+			continue
+		}
+		i := strings.IndexByte(f[0], '@')
+		if i <= 0 {
+			continue
+		}
+		s := &Snapshot{
+			Name: f[0], Snap: f[0][i+1:],
+			Used: parseI64(f[1]), Refer: parseI64(f[2]), Creation: parseI64(f[3]),
+			Written: -1, // pre-written captures tolerated
+		}
+		if len(f) >= 5 {
+			s.Written = parseI64(f[4])
+		}
+		out[f[0][:i]] = append(out[f[0][:i]], s)
+	}
+	for _, snaps := range out {
+		sort.SliceStable(snaps, func(i, j int) bool { return snaps[i].Creation < snaps[j].Creation })
+	}
+	return out
+}
+
 // SnapFamily is a run of snapshots sharing a name prefix followed by a
 // timestamp — automation output (zfsrecvd-*, manual-*, autosnap_*) that
 // collapses to one browser row. Named milestone snapshots never group.

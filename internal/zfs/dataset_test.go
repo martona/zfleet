@@ -85,6 +85,29 @@ func TestParseSnapshots(t *testing.T) {
 	}
 }
 
+func TestParseAllSnapshots(t *testing.T) {
+	text := readFixture(t, filepath.Join(fixtureDir25, "zfs-list-snapshots.out"))
+	all := ParseAllSnapshots(text)
+	bb := all["rust/recv/bergamo-tiny-borgbackup"]
+	per := ParseSnapshots(text, "rust/recv/bergamo-tiny-borgbackup")
+	if len(bb) != len(per) || len(bb) == 0 {
+		t.Fatalf("grouped %d vs per-ds %d", len(bb), len(per))
+	}
+	for i := range per {
+		if per[i].Name != bb[i].Name {
+			t.Fatalf("order diverges from ParseSnapshots at %d", i)
+		}
+	}
+	if _, ok := all["rust"]; ok {
+		t.Error("pool root gained snapshots it does not have")
+	}
+	// synthetic 5-col rows: written survives grouping, order is chronological
+	syn := ParseAllSnapshots("a/b@s1\t1\t2\t100\t7\na/b@s0\t1\t2\t50\t9\n")
+	if s := syn["a/b"]; len(s) != 2 || s[0].Snap != "s0" || s[0].Written != 9 || s[1].Written != 7 {
+		t.Fatalf("synthetic parse = %+v", syn["a/b"])
+	}
+}
+
 func TestGroupSnapshots(t *testing.T) {
 	text := readFixture(t, filepath.Join(fixtureDir25, "zfs-list-snapshots.out"))
 
