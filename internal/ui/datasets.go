@@ -390,6 +390,49 @@ func famTarget(container string, f *zfs.SnapFamily) string {
 	return container + "@" + strings.Join(names, ",")
 }
 
+// bulkToggleMatches is mc's `*`, scoped to the hunt: every row the filter
+// matched, one key. Everything selected → clear them; otherwise select
+// the rest. Only DIRECT marks are cleared — stars inherited from a
+// dataset mark the operator placed are that mark's business, not `*`'s.
+func (m *Model) bulkToggleMatches() bool {
+	if m.filter == "" {
+		return false
+	}
+	var todo []treeRow
+	allSel, anyDirect := true, false
+	for _, r := range m.treeRows() {
+		if !m.filterMarkable(r) {
+			continue
+		}
+		todo = append(todo, r)
+		if !r.sel {
+			allSel = false
+		}
+		if m.marks[r.id] {
+			anyDirect = true
+		}
+	}
+	if len(todo) == 0 {
+		return false
+	}
+	switch {
+	case allSel && anyDirect:
+		for _, r := range todo {
+			delete(m.marks, r.id)
+		}
+	case allSel:
+		return false // covered entirely by dataset marks; not ours to break
+	default:
+		for _, r := range todo {
+			if !r.sel {
+				m.toggleMark(r)
+			}
+		}
+	}
+	m.markGen++
+	return true
+}
+
 // markDebounce schedules the reclaim computation a beat after the last
 // mark change, so spacebar streaks cost one exec, not one per press.
 func (m *Model) markDebounce() tea.Cmd {

@@ -407,14 +407,19 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filter, m.filterIn = "", false
 		case "enter":
 			m.filterIn = false
-		case "down", "up":
+		case "down", "up", "pgdown", "pgup":
 			// the bar is modeless: arrows leave it standing and walk the
 			// results it is already showing
 			m.filterIn = false
-			if msg.String() == "down" {
+			switch msg.String() {
+			case "down":
 				m.treeMove(1)
-			} else {
+			case "up":
 				m.treeMove(-1)
+			case "pgdown":
+				m.treeMove(m.pageStep())
+			case "pgup":
+				m.treeMove(-m.pageStep())
 			}
 			return m, tea.Batch(m.ensureFilterCmd(), m.treeEnsure())
 		case "backspace":
@@ -449,6 +454,14 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.treeMove(1)
 	case "up":
 		m.treeMove(-1)
+	case "pgdown":
+		m.treeMove(m.pageStep())
+	case "pgup":
+		m.treeMove(-m.pageStep())
+	case "*":
+		if m.bulkToggleMatches() {
+			return m, tea.Batch(m.treeEnsure(), m.markDebounce())
+		}
 	case "j":
 		m.panelScroll++
 	case "k":
@@ -539,6 +552,14 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.treeSortUsed = !m.treeSortUsed
 	}
 	return m, m.treeEnsure()
+}
+
+// pageStep is one screenful of rows for pgup/pgdn.
+func (m *Model) pageStep() int {
+	if s := m.h - 6; s > 5 {
+		return s
+	}
+	return 5
 }
 
 // ExpandFor unfolds the tree down to the given pool or dataset path on a

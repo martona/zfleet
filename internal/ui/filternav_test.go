@@ -126,3 +126,46 @@ func TestSpaceFloodGuard(t *testing.T) {
 		t.Fatal("deliberate re-toggle after another key did not unmark")
 	}
 }
+
+// `*` is the one-key vacuum: toggle-select everything the filter matched.
+// Direct marks only — inherited stars belong to their dataset mark.
+func TestBulkToggle(t *testing.T) {
+	m, h := marksFixture()
+	h.pools = []*zfs.Pool{{Name: "p"}}
+	press := func(msg tea.KeyMsg) { m.rowsOK = false; m.treeKeys(msg); m.rowsOK = false }
+	star := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("*")}
+
+	m.filter = "@s"
+	press(star)
+	if len(m.marks) != 3 { // p/a@s1, p/a@s2, p/a/b@bs1
+		t.Fatalf("bulk select: marks = %v", m.marks)
+	}
+	press(star)
+	if len(m.marks) != 0 {
+		t.Fatalf("bulk deselect: marks = %v", m.marks)
+	}
+
+	// inherited stars survive *: mark ds p/a/b (covers bs1); * then only
+	// toggles the uncovered s1/s2
+	m.rowsOK = false
+	m.toggleMark(dsRow(h, h.dsTrees["p"], "p/a/b", 3))
+	m.rowsOK = false
+	press(star) // selects the uncovered s1, s2
+	if !m.marks[treeDsID(h, "p/a@s1")] || !m.marks[treeDsID(h, "p/a@s2")] ||
+		!m.marks[treeDsID(h, "p/a/b")] || m.marks[treeDsID(h, "p/a/b@bs1")] {
+		t.Fatalf("bulk select with cover: marks = %v", m.marks)
+	}
+	press(star) // clears s1/s2, leaves the dataset mark (and its cover) intact
+	if m.marks[treeDsID(h, "p/a@s1")] || !m.marks[treeDsID(h, "p/a/b")] {
+		t.Fatalf("bulk deselect with cover: marks = %v", m.marks)
+	}
+	// everything covered by one dataset mark: * refuses — not its to break
+	m.clearMarks()
+	m.rowsOK = false
+	m.toggleMark(dsRow(h, h.dsTrees["p"], "p/a", 2)) // covers every match
+	m.rowsOK = false
+	press(star)
+	if !m.marks[treeDsID(h, "p/a")] || len(m.marks) != 1 {
+		t.Fatalf("bulk on all-inherited: marks = %v", m.marks)
+	}
+}
