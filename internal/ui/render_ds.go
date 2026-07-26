@@ -18,19 +18,24 @@ func keyChip(key, label string) string {
 	return styInv.Render(" "+key+" ") + " " + label
 }
 
-// dryReclaim extracts the reclaim bytes from a cached `-nvp` dry-run.
+// dryReclaim extracts the reclaim bytes from a cached `-nvp` dry-run,
+// memoizing the parse — the Σ math reads every group every frame.
 func dryReclaim(r *dryResult) (int64, bool) {
 	if r == nil || r.pending || r.errText != "" {
 		return 0, false
 	}
-	for _, l := range strings.Split(r.text, "\n") {
-		f := strings.Fields(l)
-		if len(f) == 2 && f[0] == "reclaim" {
-			n, err := strconv.ParseInt(f[1], 10, 64)
-			return n, err == nil
+	if !r.tried {
+		r.tried = true
+		for _, l := range strings.Split(r.text, "\n") {
+			f := strings.Fields(l)
+			if len(f) == 2 && f[0] == "reclaim" {
+				n, err := strconv.ParseInt(f[1], 10, 64)
+				r.reclaim, r.haveN = n, err == nil
+				break
+			}
 		}
 	}
-	return 0, false
+	return r.reclaim, r.haveN
 }
 
 // reclaimLines renders the dry-run verdict for a target: the exact figure
@@ -119,8 +124,11 @@ func snapTable(snaps []*zfs.Snapshot, w int) []string {
 // selInspector is the collection: every marked thing grouped per dataset,
 // each group with its honest number — grouped dry-run reclaim for
 // snapshot sets (per-snapshot sums lie about shared blocks), recursive
-// `used` for whole datasets — and the Σ across the fleet.
-func selInspector(m *Model, w int) []string {
+// `used` for whole datasets — and the Σ across the fleet. Inventory lines
+// outside the visible window (off/height, one screen of slack each way)
+// stay as empty placeholders: the scroll accounting holds, the styling
+// cost doesn't — at thousands of marks that IS the frame budget.
+func selInspector(m *Model, w, off, height int) []string {
 	groups := m.markGroups()
 	hosts := map[string]bool{}
 	for _, g := range groups {
@@ -204,30 +212,50 @@ func selInspector(m *Model, w int) []string {
 	if nameW < 16 {
 		nameW = 16
 	}
+	win0, win1 := off-height, off+2*height
+	emit := func(f func() string) {
+		if i := len(lines); i >= win0 && i <= win1 {
+			lines = append(lines, f())
+		} else {
+			lines = append(lines, "")
+		}
+	}
 	for _, g := range groups {
+		g := g
 		switch {
 		case g.dsMark:
-			val := "…"
-			if n, ok := value(g); ok {
-				val = zfs.NiceBytes(n)
-			}
-			lines = append(lines, " "+padR(truncate(qualify(g)+" ", nameW-11), nameW-11)+
-				styWarn.Render(padR("dataset -r", 11))+dimUnit(padL(val, 8)))
+			emit(func() string {
+				val := "…"
+				if n, ok := value(g); ok {
+					val = zfs.NiceBytes(n)
+				}
+				return " " + padR(truncate(qualify(g)+" ", nameW-11), nameW-11) +
+					styWarn.Render(padR("dataset -r", 11)) + dimUnit(padL(val, 8))
+			})
 		case g.pseudo:
-			lines = append(lines, " "+styDim.Render(padR(truncate(qualify(g)+"@ (resolving…)", nameW), nameW)))
+			emit(func() string {
+				return " " + styDim.Render(padR(truncate(qualify(g)+"@ (resolving…)", nameW), nameW))
+			})
 		default:
 			for _, s := range g.snaps {
-				lines = append(lines, " "+padR(truncate(qualify(g)+"@"+s.Snap, nameW), nameW)+
-					dimUnit(padL(zfs.NiceBytes(s.Used), 8)))
+				s := s
+				emit(func() string {
+					return " " + padR(truncate(qualify(g)+"@"+s.Snap, nameW), nameW) +
+						dimUnit(padL(zfs.NiceBytes(s.Used), 8))
+				})
 			}
 			if len(g.snaps) == 0 && g.loaded {
-				lines = append(lines, " "+styDim.Render(truncate(qualify(g)+"@ (marks outlived their snapshots)", nameW+8)))
+				emit(func() string {
+					return " " + styDim.Render(truncate(qualify(g)+"@ (marks outlived their snapshots)", nameW+8))
+				})
 			}
 			// a failed group names its reason right under its lines — a
 			// diagnostic annotation, not a selection
 			if e := groupErr(g); e != "" {
-				lines = append(lines, "   └ "+styBad.Render("dry-run failed: ")+
-					styDim.Render(truncate(e, w-24)))
+				emit(func() string {
+					return "   └ " + styBad.Render("dry-run failed: ") +
+						styDim.Render(truncate(e, w-24))
+				})
 			}
 		}
 	}

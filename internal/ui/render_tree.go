@@ -266,6 +266,26 @@ func famLabel(f *zfs.SnapFamily) string {
 	return fmt.Sprintf("@%s (%d)", f.Label(), len(f.Snaps))
 }
 
+// rowWindow computes the visible slice the scroll logic would keep, so
+// panes render ~a screenful instead of styling thousands of rows and
+// discarding them. Returns the first rendered index and whether a
+// "(N above)" marker leads; semantics mirror the old scrollToCursor.
+func rowWindow(total, cur, h int) (from, to int, marker bool) {
+	if total > h && cur >= h-1 {
+		start := cur - h + 2
+		to = start + h
+		if to > total {
+			to = total
+		}
+		return start + 1, to, true
+	}
+	to = total
+	if to > h {
+		to = h
+	}
+	return 0, to, false
+}
+
 // treeNarrowPane renders the table for the two-pane presentation: the same
 // rows the overview shows, io columns swapped for the inspector.
 func treeNarrowPane(m *Model, w, h int) []string {
@@ -275,15 +295,19 @@ func treeNarrowPane(m *Model, w, h int) []string {
 	if nameW < 8 {
 		nameW = 8
 	}
-	var lines []string
-	for i, r := range rows {
+	from, to, marker := rowWindow(len(rows), cur, h-1)
+	lines := []string{treeHeader(nameW)}
+	if marker {
+		lines = append(lines, " "+styDim.Render(fmt.Sprintf("… (%d above)", from-1)))
+	}
+	for i := from; i < to; i++ {
 		if i == cur {
-			lines = append(lines, styInv.Render("▸ ")+treeRowLeft(m, r, nameW, true))
+			lines = append(lines, styInv.Render("▸ ")+treeRowLeft(m, rows[i], nameW, true))
 		} else {
-			lines = append(lines, "  "+treeRowLeft(m, r, nameW, false))
+			lines = append(lines, "  "+treeRowLeft(m, rows[i], nameW, false))
 		}
 	}
-	return append([]string{treeHeader(nameW)}, scrollToCursor(lines, cur, h-1)...)
+	return lines
 }
 
 // overviewPane renders the same rows full-width with io columns appended.
@@ -336,8 +360,13 @@ func overviewPane(m *Model, w, h int) []string {
 	head := treeHeader(nameW) + styDim.Render("  "+padL("READ", rateW)) +
 		rep(" ", cellW-rateW) + "  " + styDim.Render(padL("WRITE", rateW))
 
-	var lines []string
-	for i, r := range rows {
+	from, to, marker := rowWindow(len(rows), cur, h-1)
+	lines := []string{head}
+	if marker {
+		lines = append(lines, " "+styDim.Render(fmt.Sprintf("… (%d above)", from-1)))
+	}
+	for i := from; i < to; i++ {
+		r := rows[i]
 		row := "  " + treeRowLeft(m, r, nameW, false)
 		switch r.kind {
 		case rHost:
@@ -369,17 +398,5 @@ func overviewPane(m *Model, w, h int) []string {
 		}
 		lines = append(lines, row)
 	}
-	return append([]string{head}, scrollToCursor(lines, cur, h-1)...)
-}
-
-// scrollToCursor keeps the cursor row visible on long lists.
-func scrollToCursor(lines []string, cur, h int) []string {
-	if len(lines) > h && cur >= h-1 {
-		start := cur - h + 2
-		out := make([]string, 0, h)
-		out = append(out, " "+styDim.Render(fmt.Sprintf("… (%d above)", start)))
-		out = append(out, lines[start+1:]...)
-		return clampLines(out, h)
-	}
-	return clampLines(lines, h)
+	return lines
 }

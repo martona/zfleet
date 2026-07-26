@@ -133,6 +133,12 @@ func frame(m *Model) string {
 	if len(m.marks) > 0 {
 		leftTitle += fmt.Sprintf(" · %d marked", len(m.marks))
 	}
+	// panel identity first: a context change resets the scroll BEFORE the
+	// panel builds, so windowed builders see the offset they render at
+	panelKey := fmt.Sprintf("t|%s|%d", m.treeSel, m.markGen)
+	if panelKey != m.panelKey {
+		m.panelKey, m.panelScroll = panelKey, 0
+	}
 	var rightTitle string
 	var right []string
 	left := treeNarrowPane(m, leftW, contentH)
@@ -167,11 +173,7 @@ func frame(m *Model) string {
 	// for the collection as a whole
 	if m.inMarkContext(row) {
 		rightTitle = fmt.Sprintf("selection (%d)", len(m.marks))
-		right = selInspector(m, rightW)
-	}
-	panelKey := fmt.Sprintf("t|%s|%d", m.treeSel, m.markGen)
-	if panelKey != m.panelKey {
-		m.panelKey, m.panelScroll = panelKey, 0
+		right = selInspector(m, rightW, m.panelScroll, contentH)
 	}
 	right, m.panelScroll, m.rightOverflow = scrollWindow(right, m.panelScroll, contentH)
 

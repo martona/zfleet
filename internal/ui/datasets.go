@@ -41,6 +41,10 @@ type dryResult struct {
 	text    string
 	errText string
 	pending bool
+	// memoized reclaim parse — Σ reads every group every frame
+	reclaim int64
+	tried   bool
+	haveN   bool
 }
 
 // The mark set: reclaim selections across datasets and hosts. Mark ids
