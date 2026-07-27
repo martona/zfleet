@@ -29,7 +29,8 @@ type perfState struct {
 
 	focusHosts bool // ↑/↓ focus: true = the host line owns ←/→
 
-	txgs      []zfs.TxgRow
+	txgs      []zfs.TxgRow // the kstat ring as last read (~100 rows)
+	txgHist   []zfs.TxgRow // committed txgs banked across ticks for the chart
 	dmu       map[string]int64
 	dmuPrev   map[string]int64
 	dmuAt     time.Time
@@ -46,6 +47,30 @@ type perfState struct {
 // ~60s of samples at the 2s tick — enough to separate a persistent
 // straggler from rotating GC noise.
 const perfLatHistLen = 30
+
+// The kernel's txg ring (zfs_txg_history) holds only ~100 rows; the dirty
+// chart banks committed txgs across ticks to chart deeper than that.
+const perfTxgAccum = 512
+
+// mergeTxgs banks newly committed txgs from a ring read into the
+// accumulated history. Dedupe is by txg number — the ring overlaps almost
+// entirely between ticks; rows still open/quiescing get banked on a later
+// read, once committed.
+func mergeTxgs(hist, ring []zfs.TxgRow, cap int) []zfs.TxgRow {
+	last := int64(-1)
+	if len(hist) > 0 {
+		last = hist[len(hist)-1].Txg
+	}
+	for _, r := range ring {
+		if r.State == "C" && r.Txg > last {
+			hist = append(hist, r)
+		}
+	}
+	if len(hist) > cap {
+		hist = hist[len(hist)-cap:]
+	}
+	return hist
+}
 
 type perfMsg struct {
 	host   string
@@ -229,6 +254,7 @@ func (m *Model) applyPerf(msg perfMsg) {
 		m.perf.err = ""
 	}
 	m.perf.txgs = zfs.ParseTxgs(msg.txgs)
+	m.perf.txgHist = mergeTxgs(m.perf.txgHist, m.perf.txgs, perfTxgAccum)
 	m.perf.dmuPrev, m.perf.dmu = m.perf.dmu, zfs.ParseKstatMap(msg.dmuTx)
 	m.perf.dmuPrevAt, m.perf.dmuAt = m.perf.dmuAt, time.Now()
 	m.perf.zilPrev, m.perf.zil = m.perf.zil, zfs.ParseKstatMap(msg.zil)

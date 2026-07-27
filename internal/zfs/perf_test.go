@@ -74,6 +74,27 @@ func TestOpWeightedLat(t *testing.T) {
 	}
 }
 
+func TestLastDirtyGap(t *testing.T) {
+	rows := []TxgRow{
+		{Birth: 100e9, NDirty: 3 << 30}, // the last real write
+		{Birth: 105e9, NDirty: 4096},    // heartbeats since
+		{Birth: 110e9, NDirty: 0},
+		{Birth: 115e9, NDirty: 8192},
+	}
+	gap, found := LastDirtyGap(rows, 1<<20)
+	if !found || gap != 15e9 {
+		t.Errorf("gap = %d found %v, want 15e9 true", gap, found)
+	}
+	// nothing qualifies: the ring's whole span, found=false
+	gap, found = LastDirtyGap(rows, 1<<40)
+	if found || gap != 15e9 {
+		t.Errorf("quiet ring: gap = %d found %v, want 15e9 false", gap, found)
+	}
+	if _, found := LastDirtyGap(nil, 0); found {
+		t.Error("empty ring must not report a gap")
+	}
+}
+
 func TestNiceNS(t *testing.T) {
 	cases := map[int64]string{
 		-1: "-", 850: "850ns", 12000: "12.0µs", 1700000: "1.70ms",

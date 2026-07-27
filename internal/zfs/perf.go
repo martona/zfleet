@@ -99,6 +99,24 @@ func SummarizeTxgs(rows []TxgRow, lastN int) TxgSummary {
 	return s
 }
 
+// LastDirtyGap reports how long the pool has gone without a txg that
+// dirtied real data (> threshold bytes): the ns between the newest txg's
+// birth and the newest qualifying txg's. found=false means nothing in the
+// ring qualifies — the pool has been quiet for at least the ring's whole
+// span, which is returned as the gap.
+func LastDirtyGap(rows []TxgRow, threshold int64) (gapNS int64, found bool) {
+	if len(rows) == 0 {
+		return 0, false
+	}
+	newest := rows[len(rows)-1].Birth
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].NDirty > threshold {
+			return newest - rows[i].Birth, true
+		}
+	}
+	return newest - rows[0].Birth, false
+}
+
 // ParseKstatMap parses any "name type value" kstat file into a map.
 func ParseKstatMap(text string) map[string]int64 {
 	out := map[string]int64{}

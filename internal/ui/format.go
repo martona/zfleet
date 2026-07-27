@@ -19,6 +19,7 @@ import (
 var (
 	styGood    = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	styWarnInv = lipgloss.NewStyle().Reverse(true).Foreground(lipgloss.Color("11")) // the scream band
 	styBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	styDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styBold    = lipgloss.NewStyle().Bold(true)
@@ -198,6 +199,122 @@ func sparklineFam(fam sparkFam, vals []int64, width int) string {
 		cell(brailleL[l]|brailleR[r], shade(l, r))
 	}
 	flush()
+	return out.String()
+}
+
+// sparklineTall stacks `rows` braille lines into one taller chart, scaled to
+// an explicit ceiling instead of the window max. Callers pass a remembered
+// high-water mark: a self-scaled ring deflates as its biggest samples age
+// out, so a pool that once moved 1G/s would read as slammed at 100K/s.
+// Zero keeps the muted baseline dot; any nonzero sample rises at least one
+// dot. Returns the rows top-first.
+func sparklineTall(fam sparkFam, vals []int64, width, rows int, ceil int64) []string {
+	if n := 2 * width; len(vals) > n {
+		vals = vals[len(vals)-n:]
+	}
+	for _, v := range vals {
+		if v > ceil {
+			ceil = v
+		}
+	}
+	total := 4 * rows
+	lvl := func(v int64) int {
+		if v <= 0 {
+			return 1
+		}
+		l := 2 + int(v*int64(total-2)/ceil)
+		if l > total {
+			l = total
+		}
+		return l
+	}
+	clamp4 := func(x int) rune {
+		if x < 0 {
+			x = 0
+		}
+		if x > 4 {
+			x = 4
+		}
+		return rune(x)
+	}
+	pad := rep(" ", width-(len(vals)+1)/2)
+	line := make([]strings.Builder, rows)
+	run := make([]strings.Builder, rows)
+	runShade := make([]int, rows)
+	for r := range line {
+		line[r].WriteString(pad)
+		runShade[r] = -2
+	}
+	flush := func(r int) {
+		if run[r].Len() == 0 {
+			return
+		}
+		if runShade[r] < 0 {
+			line[r].WriteString(styDim.Render(run[r].String()))
+		} else {
+			line[r].WriteString(fam[runShade[r]].Render(run[r].String()))
+		}
+		run[r].Reset()
+	}
+	// column ink intensity follows the hotter sample's overall level, and
+	// the whole column wears it so a burst reads as one object
+	cell := func(lL, lR int) {
+		hot := lL
+		if lR > hot {
+			hot = lR
+		}
+		sh := -1
+		if hot > 1 {
+			sh = (hot - 2) * 3 / (total - 1)
+		}
+		for r := 0; r < rows; r++ {
+			floor := 4 * (rows - 1 - r)
+			bits := brailleL[clamp4(lL-floor)] | brailleR[clamp4(lR-floor)]
+			rsh := sh
+			if bits == 0 {
+				rsh = -1 // blank air above the column: cheap muted run
+			}
+			if rsh != runShade[r] {
+				flush(r)
+				runShade[r] = rsh
+			}
+			run[r].WriteRune(0x2800 | bits)
+		}
+	}
+	i := 0
+	if len(vals)%2 == 1 {
+		cell(0, lvl(vals[0]))
+		i = 1
+	}
+	for ; i < len(vals); i += 2 {
+		cell(lvl(vals[i]), lvl(vals[i+1]))
+	}
+	out := make([]string, rows)
+	for r := range out {
+		flush(r)
+		out[r] = line[r].String()
+	}
+	return out
+}
+
+// stripSGR removes ANSI SGR sequences so a fully composed line can be
+// re-styled wholesale — the idle perf screen dims its entire body this way
+// (silence should look like silence).
+func stripSGR(s string) string {
+	var out strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && (s[j] == ';' || (s[j] >= '0' && s[j] <= '9')) {
+				j++
+			}
+			if j < len(s) && s[j] == 'm' {
+				i = j
+				continue
+			}
+		}
+		out.WriteByte(s[i])
+	}
 	return out.String()
 }
 

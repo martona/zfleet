@@ -60,8 +60,11 @@ type Model struct {
 	ackList []ackEntry
 	ackCur  int
 
-	perf    perfState
-	perfMem map[string]string // per-host remembered perf pool
+	perf     perfState
+	perfMem  map[string]string   // per-host remembered perf pool
+	perfPeak map[string][2]int64 // "host\x00pool" → (r, w) io high-water; the
+	// tall charts' ceiling ratchets for the life of the process so history
+	// rotating out of the ring can't reinflate the recent past
 
 	selName string // current inspector pool ("host\x00pool"), for elastic resets
 	fleetW  map[string]int
@@ -109,6 +112,7 @@ func New(specs []HostSpec, multiHost bool) *Model {
 		acks:         map[string]string{},
 		ackPath:      defaultAckPath(),
 		perfMem:      map[string]string{},
+		perfPeak:     map[string][2]int64{},
 		fleetW:       map[string]int{},
 	}
 	for _, s := range specs {
