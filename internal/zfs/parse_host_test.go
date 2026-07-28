@@ -58,6 +58,32 @@ func TestParseHwmon(t *testing.T) {
 	if got := ParseHwmon(""); len(got) != 0 {
 		t.Error("empty input must yield no chips")
 	}
+}
+
+func TestParseHwmonThresholds(t *testing.T) {
+	text := "/sys/class/hwmon/hwmon0/name:k10temp\n" +
+		"/sys/class/hwmon/hwmon0/temp1_input:61000\n" +
+		"/sys/class/hwmon/hwmon0/temp1_max:60000\n" +
+		"/sys/class/hwmon/hwmon0/temp1_crit:70000\n" +
+		"/sys/class/hwmon/hwmon1/name:junk\n" +
+		"/sys/class/hwmon/hwmon1/temp1_input:30000\n" +
+		"/sys/class/hwmon/hwmon1/temp1_max:0\n" + // zero: never trusted
+		"/sys/class/hwmon/hwmon1/temp2_input:31000\n" +
+		"/sys/class/hwmon/hwmon1/temp2_max:50000\n" +
+		"/sys/class/hwmon/hwmon1/temp2_crit:40000\n" // crit ≤ max: dropped
+	chips := ParseHwmon(text)
+	if len(chips) != 2 {
+		t.Fatalf("chips = %d, want 2", len(chips))
+	}
+	if t0 := chips[0].Temps[0]; t0.MaxMilliC != 60000 || t0.CritMilliC != 70000 {
+		t.Errorf("k10temp thresholds = %d/%d, want 60000/70000", t0.MaxMilliC, t0.CritMilliC)
+	}
+	if t1 := chips[1].Temps[0]; t1.MaxMilliC != -1 || t1.CritMilliC != -1 {
+		t.Errorf("zero max must not validate: %+v", t1)
+	}
+	if t2 := chips[1].Temps[1]; t2.MaxMilliC != 50000 || t2.CritMilliC != -1 {
+		t.Errorf("inverted crit must drop: %+v", t2)
+	}
 	if !IsCPUChip("coretemp") || IsCPUChip("nvme") || !IsDriveChip("drivetemp") {
 		t.Error("chip classification broken")
 	}

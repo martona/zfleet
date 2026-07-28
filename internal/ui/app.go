@@ -272,8 +272,8 @@ func (m *Model) ApplyPoolData(host string, pools []*zfs.Pool) {
 	}
 }
 
-// ApplyAuxPools ingests the per-pool root totals and ashift values that
-// feed the allocation-overhead line.
+// ApplyAuxPools ingests the per-pool root totals and the zpool-get
+// properties (ashift for the overhead line, bclone for the cloning line).
 func (m *Model) ApplyAuxPools(host, rootsText, propsText string) {
 	h := m.hostByName(host)
 	if h == nil {
@@ -284,6 +284,7 @@ func (m *Model) ApplyAuxPools(host, rootsText, propsText string) {
 	}
 	if propsText != "" {
 		h.ashift = zfs.ParsePoolAshift(propsText)
+		h.bclone = zfs.ParsePoolBclone(propsText)
 	}
 }
 

@@ -47,7 +47,9 @@ type Source interface {
 	// txgs ring, dmu_tx counters, zil counters, module params, and a
 	// per-vdev latency iostat sample.
 	PerfTexts(ctx context.Context, pool string) (txgs, dmuTx, zil, params, iostatL string, err error)
-	// PoolProps returns `zpool get -Hp ashift` output.
+	// PoolProps returns `zpool get -Hp ashift,bcloneused,bclonesaved`
+	// output. Parsers pick their lines by property name, so fixtures
+	// captured before a property joined the list simply lack it.
 	PoolProps(ctx context.Context) (string, error)
 	// HostTexts returns per-tick host vitals: /proc/uptime, /proc/loadavg,
 	// /proc/stat, and hwmon temp files in `grep -H` path:value form. All
@@ -61,7 +63,7 @@ type Source interface {
 	// and hwmon chip→device links. Best-effort.
 	DiskTexts(ctx context.Context) (aliases, sysBlock, lsblk, hwmonDev string)
 	// SmartTexts probes for passwordless sudo and, when granted, returns
-	// `smartctl -j -a -n standby` output per disk node. sudoOK reports the
+	// `smartctl -j -x -n standby` output per disk node. sudoOK reports the
 	// probe — false means the degraded no-root experience, not an error.
 	SmartTexts(ctx context.Context, nodes []string) (texts map[string]string, sudoOK bool)
 	Name() string
@@ -136,7 +138,7 @@ func (Exec) RootTexts(ctx context.Context) (string, error) {
 }
 
 func (Exec) PoolProps(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "zpool", "get", "-Hp", "ashift").Output()
+	out, err := exec.CommandContext(ctx, "zpool", "get", "-Hp", "ashift,bcloneused,bclonesaved").Output()
 	return string(out), err
 }
 
@@ -149,7 +151,8 @@ func (Exec) HostTexts(ctx context.Context) (string, string, string, string) {
 	// produces over ssh, so one parser serves both collectors
 	var hw strings.Builder
 	for _, pat := range []string{"/sys/class/hwmon/hwmon*/name",
-		"/sys/class/hwmon/hwmon*/temp*_input", "/sys/class/hwmon/hwmon*/temp*_label"} {
+		"/sys/class/hwmon/hwmon*/temp*_input", "/sys/class/hwmon/hwmon*/temp*_label",
+		"/sys/class/hwmon/hwmon*/temp*_max", "/sys/class/hwmon/hwmon*/temp*_crit"} {
 		paths, _ := filepath.Glob(pat)
 		for _, p := range paths {
 			if b, err := os.ReadFile(p); err == nil {
@@ -207,8 +210,10 @@ func (Exec) SmartTexts(ctx context.Context, nodes []string) (map[string]string, 
 	for _, n := range nodes {
 		// smartctl exits nonzero for logged errors while still emitting
 		// full JSON — keep whatever stdout arrived
+		// -x (not -a) so ATA drives report their SCT temperature limits —
+		// the device-stated thresholds the temp tinting refuses to invent
 		b, _ := exec.CommandContext(ctx, "sudo", "-n", "smartctl",
-			"-j", "-a", "-n", "standby", "/dev/"+n).Output()
+			"-j", "-x", "-n", "standby", "/dev/"+n).Output()
 		if len(b) > 0 {
 			out[n] = string(b)
 		}

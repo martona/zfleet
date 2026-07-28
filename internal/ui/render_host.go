@@ -263,7 +263,9 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 	for _, d := range h.disks {
 		temp := styDim.Render(padL("-", 5))
 		if d.TempC >= 0 {
-			temp = dimUnit(padL(fmt.Sprintf("%d°C", d.TempC), 5))
+			ts := h.smart[d.Node]
+			temp = tempTint(d.TempC, ts.TempHigh, ts.TempCrit,
+				padL(fmt.Sprintf("%d°C", d.TempC), 5))
 		}
 		media := "ssd"
 		switch {
@@ -310,8 +312,9 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 	// host line is a named row here; drive-linked chips live above instead
 	lines = append(lines, " "+styBold.Render("sensors"))
 	type sensorRow struct {
-		name, label string
-		milli       int64
+		name, label      string
+		milli            int64
+		maxMilli, critMi int64 // driver-stated thresholds, -1 unknown
 	}
 	var srows []sensorRow
 	for _, c := range h.chips {
@@ -338,7 +341,7 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 			rows = []zfs.HwmonTemp{best}
 		}
 		for _, t := range rows {
-			srows = append(srows, sensorRow{name, t.Label, t.MilliC})
+			srows = append(srows, sensorRow{name, t.Label, t.MilliC, t.MaxMilliC, t.CritMilliC})
 		}
 	}
 	if len(srows) == 0 {
@@ -353,9 +356,16 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 			slabelW = n
 		}
 	}
+	toC := func(m int64) int {
+		if m < 0 {
+			return -1
+		}
+		return int((m + 500) / 1000)
+	}
 	for _, r := range srows {
 		lines = append(lines, "  "+padR(r.name, snameW+2)+styDim.Render(padR(r.label, slabelW+2))+
-			dimUnit(padL(fmt.Sprintf("%d°C", int((r.milli+500)/1000)), 5)))
+			tempTint(toC(r.milli), toC(r.maxMilli), toC(r.critMi),
+				padL(fmt.Sprintf("%d°C", toC(r.milli)), 5)))
 	}
 	lines = append(lines, "")
 

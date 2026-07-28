@@ -32,9 +32,17 @@ func (m *Model) cheatBase() []keyHint {
 	}
 	switch m.mode {
 	case modePerf:
-		hints := []keyHint{{"tab/←→", "pool"}}
+		// multihost: ←→ walks whichever line the ▸ marks — the label
+		// follows the focus so the bar never claims the wrong axis
+		var hints []keyHint
 		if m.multiHost {
-			hints = append(hints, keyHint{"↑↓", "hosts"})
+			walk := "pools"
+			if m.perf.focusHosts {
+				walk = "hosts"
+			}
+			hints = []keyHint{{"←→", walk}, {"↑↓", "focus"}, {"tab", "next pool"}}
+		} else {
+			hints = []keyHint{{"tab/←→", "pool"}}
 		}
 		return append(hints, keyHint{"esc", "back"}, keyHint{"q", "quit"})
 
@@ -45,7 +53,10 @@ func (m *Model) cheatBase() []keyHint {
 		}
 		row := m.treeSelected()
 		if m.inMarkContext(row) {
-			return []keyHint{{"space", "toggle"}, {"esc", "clear all"}, {"q", "quit"}}
+			// the standard tail stays: /, s and p all keep working with a
+			// selection open
+			return []keyHint{{"space", "toggle"}, {"esc", "clear all"},
+				{"/", "filter"}, {"s", "sort"}, {"p", "perf"}, {"q", "quit"}}
 		}
 		if m.filter != "" {
 			head := []keyHint{{"esc", "clear filter"}}
@@ -97,7 +108,7 @@ func (m *Model) cheatBase() []keyHint {
 			} else {
 				head = append(head, keyHint{"→", "unfold"})
 			}
-			head = append(head, keyHint{"space", "select"})
+			head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
 		case rSnap:
 			head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
 		}

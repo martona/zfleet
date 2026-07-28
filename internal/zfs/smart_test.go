@@ -67,6 +67,24 @@ func TestParseSmartSuperMicro(t *testing.T) {
 	}
 }
 
+func TestSmartTempThresholds(t *testing.T) {
+	// the nvme fixture states its own WCTEMP/CCTEMP
+	s, ok := ParseSmart(readFixture(t,
+		filepath.Join("../../testdata/fixtures/lemur/2026-07-25-smart", "smart-nvme0n1.json")))
+	if !ok || s.TempHigh != 82 || s.TempCrit != 85 {
+		t.Errorf("nvme thresholds = %d/%d, want 82/85", s.TempHigh, s.TempCrit)
+	}
+	// Exos shape: op limit == hard limit — sanity keeps high, drops crit
+	exos := `{"temperature":{"current":61,"op_limit_max":60,"limit_max":60}}`
+	if s, ok := ParseSmart(exos); !ok || s.TempHigh != 60 || s.TempCrit != -1 {
+		t.Errorf("exos = high %d crit %d, want 60/-1", s.TempHigh, s.TempCrit)
+	}
+	// absent thresholds never validate — no invented limits
+	if s, _ := ParseSmart(`{"temperature":{"current":40}}`); s.TempHigh != -1 || s.TempCrit != -1 {
+		t.Errorf("bare = %d/%d, want -1/-1", s.TempHigh, s.TempCrit)
+	}
+}
+
 func TestParseSmartVerdicts(t *testing.T) {
 	pending := `{"smart_status":{"passed":true},"temperature":{"current":41},
 		"ata_smart_attributes":{"table":[{"id":197,"raw":{"value":8}},{"id":5,"raw":{"value":0}}]}}`

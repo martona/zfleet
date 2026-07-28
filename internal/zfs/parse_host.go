@@ -74,10 +74,14 @@ var driveChips = map[string]bool{"nvme": true, "drivetemp": true}
 func IsCPUChip(name string) bool   { return cpuChips[name] }
 func IsDriveChip(name string) bool { return driveChips[name] }
 
-// HwmonTemp is one labeled reading of a chip.
+// HwmonTemp is one labeled reading of a chip, with the driver-stated
+// thresholds when the chip exports sane ones (-1 otherwise — thresholds
+// are never invented).
 type HwmonTemp struct {
-	Label  string
-	MilliC int64
+	Label      string
+	MilliC     int64
+	MaxMilliC  int64 // temp*_max, -1 unknown
+	CritMilliC int64 // temp*_crit, -1 unknown
 }
 
 // HwmonChip is one sensor chip with all its temperature readings. Every
@@ -110,11 +114,14 @@ func ParseHwmon(s string) []HwmonChip {
 		name   string
 		inputs map[string]int64
 		labels map[string]string
+		maxes  map[string]int64
+		crits  map[string]int64
 	}
 	chips := map[string]*acc{}
 	get := func(dir string) *acc {
 		if chips[dir] == nil {
-			chips[dir] = &acc{inputs: map[string]int64{}, labels: map[string]string{}}
+			chips[dir] = &acc{inputs: map[string]int64{}, labels: map[string]string{},
+				maxes: map[string]int64{}, crits: map[string]int64{}}
 		}
 		return chips[dir]
 	}
@@ -140,6 +147,14 @@ func ParseHwmon(s string) []HwmonChip {
 			}
 		case strings.HasPrefix(file, "temp") && strings.HasSuffix(file, "_label"):
 			get(dir).labels[strings.TrimSuffix(file, "_label")] = val
+		case strings.HasPrefix(file, "temp") && strings.HasSuffix(file, "_max"):
+			if v, err := strconv.ParseInt(val, 10, 64); err == nil && v > 0 {
+				get(dir).maxes[strings.TrimSuffix(file, "_max")] = v
+			}
+		case strings.HasPrefix(file, "temp") && strings.HasSuffix(file, "_crit"):
+			if v, err := strconv.ParseInt(val, 10, 64); err == nil && v > 0 {
+				get(dir).crits[strings.TrimSuffix(file, "_crit")] = v
+			}
 		}
 	}
 	var dirs []string
@@ -172,7 +187,18 @@ func ParseHwmon(s string) []HwmonChip {
 		})
 		chip := HwmonChip{Dir: d, Name: a.name}
 		for _, k := range keys {
-			chip.Temps = append(chip.Temps, HwmonTemp{Label: a.labels[k], MilliC: a.inputs[k]})
+			// thresholds are trusted only when sane: max positive, crit
+			// strictly above max when both exist — a zero or inverted pair
+			// would flag every reading forever
+			max, crit := int64(-1), int64(-1)
+			if v, ok := a.maxes[k]; ok {
+				max = v
+			}
+			if v, ok := a.crits[k]; ok && (max < 0 || v > max) {
+				crit = v
+			}
+			chip.Temps = append(chip.Temps, HwmonTemp{Label: a.labels[k],
+				MilliC: a.inputs[k], MaxMilliC: max, CritMilliC: crit})
 		}
 		out = append(out, chip)
 	}

@@ -68,6 +68,7 @@ type hostState struct {
 	pools      []*zfs.Pool
 	rootStats  map[string]zfs.RootStat
 	ashift     map[string]int
+	bclone     map[string]zfs.PoolBclone
 	arc        zfs.ArcStats
 	arcPrev    zfs.ArcStats
 	haveArc    bool
@@ -138,6 +139,7 @@ func newHostState(name, dest string, src collect.Source) *hostState {
 		cpuPct:        -1,
 		rootStats:     map[string]zfs.RootStat{},
 		ashift:        map[string]int{},
+		bclone:        map[string]zfs.PoolBclone{},
 		io:            map[string]zfs.IORates{},
 		ioHist:        map[string][]zfs.IORates{},
 		dsIO:          map[string]zfs.IORates{},

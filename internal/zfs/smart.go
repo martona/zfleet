@@ -14,6 +14,9 @@ type Smart struct {
 	HaveStatus bool
 	Passed     bool // false = the drive itself predicts failure
 	TempC      int  // -1 unknown
+	TempHigh   int  // device-stated max operating temp (SCT op limit /
+	// NVMe warning threshold), -1 unknown — thresholds are never invented
+	TempCrit   int // device-stated critical temp, -1 unknown
 	PowerOnH   int64
 	ReadBytes  int64 // lifetime host reads, -1 unknown
 	WriteBytes int64
@@ -76,7 +79,10 @@ func ParseSmart(text string) (Smart, bool) {
 			Passed bool `json:"passed"`
 		} `json:"smart_status"`
 		Temperature *struct {
-			Current int `json:"current"`
+			Current          int `json:"current"`
+			OpLimitMax       int `json:"op_limit_max"`       // ATA SCT / NVMe WCTEMP
+			CriticalLimitMax int `json:"critical_limit_max"` // NVMe CCTEMP
+			LimitMax         int `json:"limit_max"`          // ATA hard limit
 		} `json:"temperature"`
 		PowerOnTime *struct {
 			Hours int64 `json:"hours"`
@@ -104,7 +110,8 @@ func ParseSmart(text string) (Smart, bool) {
 	if json.Unmarshal([]byte(text), &j) != nil {
 		return Smart{}, false
 	}
-	s := Smart{TempC: -1, PowerOnH: -1, ReadBytes: -1, WriteBytes: -1, LifeUsed: -1, SparePct: -1}
+	s := Smart{TempC: -1, TempHigh: -1, TempCrit: -1,
+		PowerOnH: -1, ReadBytes: -1, WriteBytes: -1, LifeUsed: -1, SparePct: -1}
 	// exit bit 1 = device open ok but in low-power mode (-n standby honored)
 	s.Standby = j.Smartctl.ExitStatus&2 != 0 && j.SmartStatus == nil
 	// every verdict flows through here: the check ledger is the record of
@@ -129,8 +136,23 @@ func ParseSmart(text string) (Smart, bool) {
 			check("overall", "smart overall", "FAILED", CheckFail)
 		}
 	}
-	if j.Temperature != nil && j.Temperature.Current > 0 {
-		s.TempC = j.Temperature.Current
+	if j.Temperature != nil {
+		if j.Temperature.Current > 0 {
+			s.TempC = j.Temperature.Current
+		}
+		// device-stated thresholds, sanity-gated: high must be positive,
+		// crit must sit strictly above high (Exos report op==hard limit —
+		// an equal or inverted pair keeps high and drops crit)
+		if v := j.Temperature.OpLimitMax; v > 0 {
+			s.TempHigh = v
+		}
+		crit := j.Temperature.CriticalLimitMax
+		if crit == 0 {
+			crit = j.Temperature.LimitMax
+		}
+		if crit > 0 && (s.TempHigh < 0 || crit > s.TempHigh) {
+			s.TempCrit = crit
+		}
 	}
 	if j.PowerOnTime != nil {
 		s.PowerOnH = j.PowerOnTime.Hours

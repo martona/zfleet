@@ -89,3 +89,37 @@ func ParsePoolAshift(text string) map[string]int {
 	}
 	return out
 }
+
+// PoolBclone is a pool's block-cloning footprint: unique space holding
+// cloned blocks, and the space cloning saves.
+type PoolBclone struct {
+	Used, Saved int64
+}
+
+// ParsePoolBclone picks bcloneused/bclonesaved out of the same
+// `zpool get -Hp` text; captures from before the properties joined the
+// fetch list simply yield an empty map.
+func ParsePoolBclone(text string) map[string]PoolBclone {
+	out := map[string]PoolBclone{}
+	for _, raw := range strings.Split(text, "\n") {
+		f := strings.Split(strings.TrimRight(raw, "\r"), "\t")
+		if len(f) < 3 {
+			continue
+		}
+		v := parseI64(f[2])
+		if v < 0 {
+			continue
+		}
+		switch f[1] {
+		case "bcloneused":
+			e := out[f[0]]
+			e.Used = v
+			out[f[0]] = e
+		case "bclonesaved":
+			e := out[f[0]]
+			e.Saved = v
+			out[f[0]] = e
+		}
+	}
+	return out
+}

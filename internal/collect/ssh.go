@@ -165,7 +165,7 @@ func (s Ssh) RootTexts(ctx context.Context) (string, error) {
 }
 
 func (s Ssh) PoolProps(ctx context.Context) (string, error) {
-	return s.run(ctx, "zpool get -Hp ashift")
+	return s.run(ctx, "zpool get -Hp ashift,bcloneused,bclonesaved")
 }
 
 func (s Ssh) DestroyDryRun(ctx context.Context, target string) (string, error) {
@@ -194,7 +194,7 @@ func (s Ssh) HostTexts(ctx context.Context) (string, string, string, string) {
 	}
 	load, _ := s.run(ctx, "cat /proc/loadavg")
 	stat, _ := s.run(ctx, "cat /proc/stat")
-	hwmon, _ := s.run(ctx, "grep -H . /sys/class/hwmon/hwmon*/name /sys/class/hwmon/hwmon*/temp*_input /sys/class/hwmon/hwmon*/temp*_label 2>/dev/null")
+	hwmon, _ := s.run(ctx, "grep -H . /sys/class/hwmon/hwmon*/name /sys/class/hwmon/hwmon*/temp*_input /sys/class/hwmon/hwmon*/temp*_label /sys/class/hwmon/hwmon*/temp*_max /sys/class/hwmon/hwmon*/temp*_crit 2>/dev/null")
 	return up, load, stat, hwmon
 }
 
@@ -217,7 +217,7 @@ func (s Ssh) SmartTexts(ctx context.Context, nodes []string) (map[string]string,
 	for _, n := range nodes {
 		// keep stdout even on nonzero exits — smartctl flags logged errors
 		// in its exit code while the JSON is complete
-		text, _ := s.run(ctx, "sudo -n smartctl -j -a -n standby /dev/"+quote(n))
+		text, _ := s.run(ctx, "sudo -n smartctl -j -x -n standby /dev/"+quote(n))
 		if len(text) > 0 {
 			out[n] = text
 		}

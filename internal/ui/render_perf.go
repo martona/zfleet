@@ -261,16 +261,15 @@ func perfPane(m *Model, w int) []string {
 	// its above-line part warn — the part over the flood line is the part
 	// that delays writes ──
 	const chartH, prefixW, scaleLbl = 4, 9, 17
-	// the chart hugs its data: the kernel ring remembers only ~100 txgs, so
-	// txgHist banks committed rows across ticks (committed only — ndirty is
+	// fixed geometry: the chart claims its full width from the first frame —
+	// rule and labels pinned, newest txg at the right edge, history growing
+	// leftward into the blank as txgHist banks committed rows across ticks
+	// (the kernel ring remembers only ~100; committed only — ndirty is
 	// recorded at sync completion, and charting open rows pinned a false
-	// floor to the newest edge) and the rule/labels sit at the data's own
-	// width, growing toward the terminal edge as the bank fills
+	// floor to the newest edge). A right edge that travels as the bank
+	// fills was noise.
 	txgRows := m.perf.txgHist
-	chartW := (len(txgRows) + 1) / 2
-	if avail := w - prefixW - scaleLbl; chartW > avail {
-		chartW = avail
-	}
+	chartW := w - prefixW - scaleLbl
 	if chartW < 20 {
 		chartW = 20
 	}

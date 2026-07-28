@@ -274,6 +274,15 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		}
 	}
 
+	// block-cloning footprint — only pools that actually hold cloned
+	// blocks (reflink-era cp, clone-aware receives) earn the line
+	if bc := h.bclone[p.Name]; bc.Used > 0 {
+		ratio := float64(bc.Used+bc.Saved) / float64(bc.Used)
+		lines = append(lines, " cloned "+zfs.NiceBytes(bc.Used)+
+			styDim.Render(" · saving ")+zfs.NiceBytes(bc.Saved)+
+			styDim.Render(fmt.Sprintf(" (×%.2f)", ratio)))
+	}
+
 	lines = append(lines, "")
 
 	// live io, promoted above the topology: host-view grammar plus the
@@ -324,6 +333,7 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		verdict string
 		vsty    lipgloss.Style
 		temp    string
+		tempHot int // 0 plain · 1 over the device's stated limit · 2 critical
 		read    string
 		written string
 		note    string
@@ -353,12 +363,20 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 			}
 		}
 		temp, read, written := "", "", ""
+		tempHot := 0
 		var drill []string
 		if len(v.Children) == 0 {
 			if d := h.diskFor(v.Name); d != nil {
 				temp = "-" // resolved but unsensed
 				if d.TempC >= 0 {
 					temp = fmt.Sprintf("%d°C", d.TempC)
+					ts := h.smart[d.Node]
+					switch {
+					case ts.TempCrit > 0 && d.TempC >= ts.TempCrit:
+						tempHot = 2
+					case ts.TempHigh > 0 && d.TempC >= ts.TempHigh:
+						tempHot = 1
+					}
 				}
 				if s, ok := h.smart[d.Node]; ok {
 					if s.ReadBytes >= 0 {
@@ -399,7 +417,7 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		if verdict == "" {
 			verdict = v.State
 		}
-		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, sevStyle(sev), temp, read, written, v.Note, drill})
+		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, sevStyle(sev), temp, tempHot, read, written, v.Note, drill})
 		for _, c := range v.Children {
 			walk(c, "", depth+1)
 		}
@@ -458,6 +476,10 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		switch {
 		case e.temp == "" || e.temp == "-":
 			row += styDim.Render(padL(e.temp, 6))
+		case e.tempHot == 2:
+			row += styBad.Render(padL(e.temp, 6))
+		case e.tempHot == 1:
+			row += styWarn.Render(padL(e.temp, 6))
 		default:
 			row += dimUnit(padL(e.temp, 6))
 		}

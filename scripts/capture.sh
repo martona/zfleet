@@ -29,7 +29,7 @@ SNAPFIELDS="name,used,refer,creation,written"
 
 run zpool-status.out zpool status
 run zpool-list-Hpv.out zpool list -Hpv
-run zpool-ashift.out zpool get -Hp ashift
+run zpool-ashift.out zpool get -Hp ashift,bcloneused,bclonesaved
 run zpool-iostat-Hpv.out zpool iostat -Hpy 1 1
 run arcstats.out cat /proc/spl/kstat/zfs/arcstats
 run zfs-list-wide.out zfs list -Hp -r -t filesystem,volume -o "$DSFIELDS"
@@ -66,8 +66,8 @@ sh_run hwmon-dev.out 'for h in /sys/class/hwmon/hwmon*; do [ -e "$h/device" ] &&
 if sudo -n true 2>/dev/null; then
 	echo ok >"$d/sudo-ok"
 	for disk in $(lsblk -bdno NAME 2>/dev/null | grep -Ev "^(loop|zd|sr|nbd|dm-)"); do
-		sudo -n smartctl -j -a -n standby "/dev/$disk" >"$d/smart-$disk.json" 2>>"$m"
-		echo "exit=$? smart-$disk.json <= smartctl -j -a -n standby /dev/$disk" >>"$m"
+		sudo -n smartctl -j -x -n standby "/dev/$disk" >"$d/smart-$disk.json" 2>>"$m"
+		echo "exit=$? smart-$disk.json <= smartctl -j -x -n standby /dev/$disk" >>"$m"
 	done
 fi
 
@@ -78,6 +78,6 @@ run proc-stat.out cat /proc/stat
 run kernel.out cat /proc/sys/kernel/osrelease
 run os-release.out cat /etc/os-release
 run zfs-version.out zfs version
-sh_run hwmon.out 'grep -H . /sys/class/hwmon/hwmon*/name /sys/class/hwmon/hwmon*/temp*_input /sys/class/hwmon/hwmon*/temp*_label 2>/dev/null'
+sh_run hwmon.out 'grep -H . /sys/class/hwmon/hwmon*/name /sys/class/hwmon/hwmon*/temp*_input /sys/class/hwmon/hwmon*/temp*_label /sys/class/hwmon/hwmon*/temp*_max /sys/class/hwmon/hwmon*/temp*_crit 2>/dev/null'
 
 echo "$d"

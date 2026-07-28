@@ -45,6 +45,27 @@ func TestParsePoolAshift(t *testing.T) {
 	}
 }
 
+func TestParsePoolBclone(t *testing.T) {
+	// shape captured live on cp4 2026-07-27 (tabs, -Hp raw bytes)
+	text := "bpool\tashift\t12\tlocal\n" +
+		"bpool\tbcloneused\t0\t-\n" +
+		"bpool\tbclonesaved\t0\t-\n" +
+		"rust\tashift\t12\tlocal\n" +
+		"rust\tbcloneused\t78383153152\t-\n" +
+		"rust\tbclonesaved\t78383153152\t-\n"
+	bc := ParsePoolBclone(text)
+	if bc["rust"].Used != 78383153152 || bc["rust"].Saved != 78383153152 {
+		t.Errorf("rust bclone = %+v", bc["rust"])
+	}
+	if bc["bpool"].Used != 0 {
+		t.Errorf("bpool bclone = %+v, want zero", bc["bpool"])
+	}
+	// ashift-only captures from before the properties joined the fetch list
+	if got := ParsePoolBclone("tank\tashift\t12\tlocal\n"); len(got) != 0 {
+		t.Errorf("old capture should yield no bclone entries, got %+v", got)
+	}
+}
+
 func TestParseRootStats(t *testing.T) {
 	m := ParseRootStats("rust\t100\t200\nbpool\t5\t-\n")
 	if m["rust"].Used != 100 || m["rust"].LogicalUsed != 200 {

@@ -364,6 +364,21 @@ func dimLabels(s string) string {
 	return out.String()
 }
 
+// tempTint brightens a temperature readout that exceeds its DEVICE-stated
+// thresholds — warn yellow at the operating limit, bad red at critical.
+// No stated thresholds, no tint: readings are never judged against
+// invented limits. Display-tier only — nothing here enters the severity
+// chain (temps oscillate; they are conditions, not facts to ack).
+func tempTint(c, high, crit int, cell string) string {
+	switch {
+	case crit > 0 && c >= crit:
+		return styBad.Render(cell)
+	case high > 0 && c >= high:
+		return styWarn.Render(cell)
+	}
+	return dimUnit(cell)
+}
+
 // dimUnit dims the trailing unit of a readout ("1.88G", "43%") so the
 // digits carry the line and adjacent numeric columns separate visually.
 // Safe on right-padded input — the suffix scan stops at the digits.
