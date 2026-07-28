@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -66,36 +65,18 @@ func frame(m *Model) string {
 		return "─" + seg + rep("─", w-1-lipgloss.Width(seg))
 	}
 
-	// full-width presentations: the performance dashboard, or the tree
-	// with the cursor on the overview row
-	if m.mode == modePerf || (m.mode == modePools && m.treeSelected().kind == rOverview) {
+	// full-width presentation: the tree with the cursor on the overview row
+	if m.mode == modePools && m.treeSelected().kind == rOverview {
 		inner := m.w - 2
-		var lines []string
 		heading := "overview"
-		if ft := m.filterTitle(); ft != "" && m.mode == modePools {
+		if ft := m.filterTitle(); ft != "" {
 			heading = ft
 		}
-		if m.mode == modePools && len(m.marks) > 0 {
+		if len(m.marks) > 0 {
 			heading += fmt.Sprintf(" · %d marked", len(m.marks))
 		}
-		if m.mode == modePerf {
-			heading = "performance · " + m.perf.pool
-			if m.multiHost && m.perf.host != nil {
-				heading = "performance · " + m.perf.host.name + ":" + m.perf.pool
-			}
-			lines = perfPane(m, inner)
-			key := "p|" + m.perf.pool
-			if m.perf.host != nil {
-				key = "p|" + m.perf.host.name + "\x00" + m.perf.pool
-			}
-			if key != m.panelKey {
-				m.panelKey, m.panelScroll = key, 0
-			}
-			lines, m.panelScroll, m.rightOverflow = scrollWindow(lines, m.panelScroll, contentH)
-		} else {
-			lines = overviewPane(m, inner, contentH)
-			m.rightOverflow = false
-		}
+		lines := overviewPane(m, inner, contentH)
+		m.rightOverflow = false
 		var b strings.Builder
 		b.WriteString("┌" + title(heading, inner) + "┐\n")
 		for i := 0; i < contentH; i++ {
@@ -235,9 +216,10 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	for _, n := range p.Notes {
 		noteLines = append(noteLines, wrap(n, w-3)...)
 	}
-	if len(noteLines) > 4 {
-		hidden := len(noteLines) - 4
-		noteLines = append(noteLines[:4], fmt.Sprintf("… (+%d lines — zpool status has the rest)", hidden))
+	// the unified panel is busy — the zpool prose yields after two lines
+	if len(noteLines) > 2 {
+		hidden := len(noteLines) - 2
+		noteLines = append(noteLines[:2], fmt.Sprintf("… (+%d lines — zpool status has the rest)", hidden))
 	}
 	for _, n := range noteLines {
 		head = append(head, " "+styWarn.Render(n))
@@ -245,6 +227,16 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 
 	head = append(head, "")
 	lines := head
+
+	// the live engine: banner, io charts, dirty chart, arc, txg, zil
+	lines = append(lines, poolPerfLines(m, h, p, w)...)
+	lines = append(lines, "")
+
+	// the unified vdev table: verdicts, temps, windowed latency, odometers
+	lines = append(lines, poolTable(m, h, p, w)...)
+	lines = append(lines, "")
+
+	// capacity basement: class bars, allocation overhead, cloning footprint
 	for _, c := range p.Classes {
 		label := c.Name
 		if label == "logs" {
@@ -281,218 +273,6 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		lines = append(lines, " cloned "+zfs.NiceBytes(bc.Used)+
 			styDim.Render(" · saving ")+zfs.NiceBytes(bc.Saved)+
 			styDim.Render(fmt.Sprintf(" (×%.2f)", ratio)))
-	}
-
-	lines = append(lines, "")
-
-	// live io, promoted above the topology: host-view grammar plus the
-	// ops/s readings a pool has earned
-	if r, ok := h.io[p.Name]; ok {
-		hist := h.ioHist[p.Name]
-		rh := make([]int64, len(hist))
-		wh := make([]int64, len(hist))
-		for j, s := range hist {
-			rh[j] = s.RBw
-			wh[j] = s.WBw
-		}
-		sw := w - 33
-		if sw > dsIOHistLen/2 {
-			sw = dsIOHistLen / 2
-		}
-		if sw < 8 {
-			sw = 8
-		}
-		// one shared elastic width for both ops cells — separate keys let a
-		// read burst widen only its own line and the right edges drift
-		ops := func(bw, n int64) string {
-			cell := elastic(h.ioW, "ops", opsCell(bw, n))
-			if bw == 0 && n == 0 {
-				return styDim.Render(cell)
-			}
-			return dimUnit(cell)
-		}
-		lines = append(lines,
-			" "+styBold.Render("io")+"   r "+ioRate(r.RBw, 7)+"  "+sparklineFam(sparkSteel, rh, sw)+
-				"  "+ops(r.RBw, r.ROps),
-			"      w "+ioRate(r.WBw, 7)+"  "+sparklineFam(sparkGold, wh, sw)+
-				"  "+ops(r.WBw, r.WOps))
-	} else {
-		lines = append(lines, " "+styBold.Render("io")+"   "+styDim.Render("sampling…"))
-	}
-	lines = append(lines, "")
-
-	// topology, fully expanded. The three error-counter columns are gone:
-	// zeros were noise, so the verdict column carries the story instead —
-	// ONLINE for the healthy, counters REPLACING the word on a serving
-	// device with errors, state · counters when both have news. The column
-	// sizes itself to its longest occupant.
-	type topoEnt struct {
-		depth   int
-		display string
-		sum     string
-		verdict string
-		vsty    lipgloss.Style
-		temp    string
-		tempHot int // 0 plain · 1 over the device's stated limit · 2 critical
-		read    string
-		written string
-		note    string
-		drill   []string // the check ledger, pre-rendered, under warned leaves
-	}
-	var ents []topoEnt
-	var walk func(v *zfs.Vdev, classPrefix string, depth int)
-	walk = func(v *zfs.Vdev, classPrefix string, depth int) {
-		sum := zfs.NiceBytes(v.Size)
-		if len(v.Children) > 0 {
-			leaves := v.Leaves()
-			sum = fmt.Sprintf("%d× %s", len(leaves), zfs.NiceBytes(leaves[0].Size))
-		}
-		// the verdict column is the UNIFIED health of this row — zpool
-		// state, zpool counters, and the drive's own smart testimony,
-		// worst tier wins, reasons spelled out. A WARN in the tree must
-		// find its cause here, not a dead end.
-		sev := stateSev(v.State)
-		var parts []string
-		if v.State != "ONLINE" {
-			parts = append(parts, v.State)
-		}
-		if badge := errBadge(zfs.ErrCount(v.ReadErr), zfs.ErrCount(v.WriteErr), zfs.ErrCount(v.CksumErr), 24); badge != "" {
-			parts = append(parts, badge)
-			if sev < sevWarn {
-				sev = sevWarn
-			}
-		}
-		temp, read, written := "", "", ""
-		tempHot := 0
-		var drill []string
-		if len(v.Children) == 0 {
-			if d := h.diskFor(v.Name); d != nil {
-				temp = "-" // resolved but unsensed
-				if d.TempC >= 0 {
-					temp = fmt.Sprintf("%d°C", d.TempC)
-					ts := h.smart[d.Node]
-					switch {
-					case ts.TempCrit > 0 && d.TempC >= ts.TempCrit:
-						tempHot = 2
-					case ts.TempHigh > 0 && d.TempC >= ts.TempHigh:
-						tempHot = 1
-					}
-				}
-				if s, ok := h.smart[d.Node]; ok {
-					if s.ReadBytes >= 0 {
-						read = zfs.NiceBytes(s.ReadBytes)
-					}
-					if s.WriteBytes >= 0 {
-						written = zfs.NiceBytes(s.WriteBytes)
-					}
-					// the EFFECTIVE tier joins the verdict; the drill
-					// beneath carries the factfinding — cause and alarm in
-					// the same panel. Fully-acked drives read "ack".
-					switch h.diskSmartSev(d.Node) {
-					case sevErr:
-						parts = append(parts, "FAIL")
-						sev = sevErr
-					case sevWarn:
-						parts = append(parts, "WARN")
-						if sev < sevWarn {
-							sev = sevWarn
-						}
-					default:
-						if smartSev(s) > sevOK {
-							parts = append(parts, "ack")
-						}
-					}
-					// any UNANSWERED alarm on this leaf — state, counters,
-					// or the drive's own — lays the smart ledger out
-					// beneath it; an all-ok ledger under a counter badge is
-					// itself a finding (the errors are upstream of the
-					// platters)
-					if m.verboseDrives || sev > sevOK {
-						drill = drillLines(h, d, s, " "+rep("  ", depth+1)+"  ", "")
-					}
-				}
-			}
-		}
-		verdict := strings.Join(parts, " · ")
-		if verdict == "" {
-			verdict = v.State
-		}
-		ents = append(ents, topoEnt{depth, classPrefix + v.Name, sum, verdict, sevStyle(sev), temp, tempHot, read, written, v.Note, drill})
-		for _, c := range v.Children {
-			walk(c, "", depth+1)
-		}
-	}
-	for _, c := range p.Classes {
-		prefix := ""
-		if c.Name != "data" {
-			prefix = c.Name + " "
-			if c.Name == "logs" {
-				prefix = "log "
-			}
-		}
-		for _, v := range c.Vdevs {
-			walk(v, prefix, 0)
-		}
-	}
-	vw := lipgloss.Width("STATE")
-	haveLife := false
-	for _, e := range ents {
-		if n := lipgloss.Width(e.verdict); n > vw {
-			vw = n
-		}
-		if e.read != "" || e.written != "" {
-			haveLife = true
-		}
-	}
-	lifeW := 0
-	if haveLife {
-		lifeW = 14 // two lifetime odometers where the counter columns once sat
-	}
-	nameW := w - 13 - vw - lifeW
-	if nameW > 42 {
-		nameW = 42
-	}
-	if nameW < 12 {
-		nameW = 12
-	}
-	ashiftCell := ""
-	if a, ok := h.ashift[p.Name]; ok {
-		ashiftCell = styDim.Render("ashift " + strconv.Itoa(a))
-	}
-	topoHead := padR("STATE", vw) + padL("TEMP", 6)
-	if haveLife {
-		topoHead += padL("READ", 7) + padL("WRIT", 7)
-	}
-	lines = append(lines, " "+padR(ashiftCell, nameW+9)+" "+styDim.Render(topoHead))
-	life := func(v string) string {
-		if v == "" {
-			return rep(" ", 7)
-		}
-		return dimUnit(padL(v, 7))
-	}
-	for _, e := range ents {
-		row := " " + rep("  ", e.depth) + padR(truncate(e.display, nameW-e.depth*2), nameW-e.depth*2) +
-			padL(e.sum, 9) + " " + e.vsty.Render(padR(e.verdict, vw))
-		switch {
-		case e.temp == "" || e.temp == "-":
-			row += styDim.Render(padL(e.temp, 6))
-		case e.tempHot == 2:
-			row += styBad.Render(padL(e.temp, 6))
-		case e.tempHot == 1:
-			row += styWarn.Render(padL(e.temp, 6))
-		default:
-			row += dimUnit(padL(e.temp, 6))
-		}
-		if haveLife {
-			row += life(e.read) + life(e.written)
-		}
-		if e.note != "" {
-			if room := w - lipgloss.Width(row) - 2; room >= 4 {
-				row += " " + styWarn.Render(truncate(e.note, room))
-			}
-		}
-		lines = append(lines, row)
-		lines = append(lines, e.drill...)
 	}
 
 	return lines
@@ -556,15 +336,8 @@ func (m *Model) filterTitle() string {
 // stripHost resolves which host the vitals strip should reflect: the one
 // owning whatever the cursor is on.
 func (m *Model) stripHost() *hostState {
-	switch m.mode {
-	case modePerf:
-		if m.perf.host != nil {
-			return m.perf.host
-		}
-	default:
-		if row := m.treeSelected(); row.host != nil {
-			return row.host
-		}
+	if row := m.treeSelected(); row.host != nil {
+		return row.host
 	}
 	return m.hosts[0]
 }

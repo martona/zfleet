@@ -17,11 +17,7 @@ func (m *Model) cheatHints() []keyHint {
 	hints := m.cheatBase()
 	// the scroll hint earns its slot only when there is something to scroll
 	if m.rightOverflow {
-		label := "scrl right"
-		if m.mode == modePerf {
-			label = "scroll"
-		}
-		hints = append(hints, keyHint{"j/k", label})
+		hints = append(hints, keyHint{"j/k", "scrl right"})
 	}
 	return hints
 }
@@ -30,94 +26,75 @@ func (m *Model) cheatBase() []keyHint {
 	if m.ackPop {
 		return []keyHint{{"enter", "ack"}, {"↑↓", "move"}, {"esc", "close"}}
 	}
-	switch m.mode {
-	case modePerf:
-		// multihost: ←→ walks whichever line the ▸ marks — the label
-		// follows the focus so the bar never claims the wrong axis
-		var hints []keyHint
-		if m.multiHost {
-			walk := "pools"
-			if m.perf.focusHosts {
-				walk = "hosts"
-			}
-			hints = []keyHint{{"←→", walk}, {"↑↓", "focus"}, {"tab", "next pool"}}
-		} else {
-			hints = []keyHint{{"tab/←→", "pool"}}
-		}
-		return append(hints, keyHint{"esc", "back"}, keyHint{"q", "quit"})
-
-	default: // tree screen
-		if m.filterIn {
-			return []keyHint{{"", "type to filter…"}, {"↓", "results"},
-				{"enter", "keep"}, {"esc", "cancel"}}
-		}
-		row := m.treeSelected()
-		if m.inMarkContext(row) {
-			// the standard tail stays: /, s and p all keep working with a
-			// selection open
-			return []keyHint{{"space", "toggle"}, {"esc", "clear all"},
-				{"/", "filter"}, {"s", "sort"}, {"p", "perf"}, {"q", "quit"}}
-		}
-		if m.filter != "" {
-			head := []keyHint{{"esc", "clear filter"}}
-			if m.filterMarkable(row) {
-				head = append(head, keyHint{"space", "select"})
-			}
-			return append(head, keyHint{"/", "filter"}, keyHint{"s", "sort"},
-				keyHint{"p", "perf"}, keyHint{"q", "quit"})
-		}
-		vLabel := "all checks"
-		if m.verboseDrives {
-			vLabel = "warns only"
-		}
-		var head []keyHint
-		switch row.kind {
-		case rOverview:
-			head = []keyHint{{"↓", "browse"}}
-		case rHost:
-			head = []keyHint{{"v", vLabel}}
-		case rPool:
-			if row.expanded {
-				head = append(head, keyHint{"←", "collapse"})
-			} else {
-				head = append(head, keyHint{"→", "expand"})
-			}
-			head = append(head, keyHint{"v", vLabel})
-		case rDataset:
-			switch {
-			case row.expanded:
-				head = append(head, keyHint{"←", "collapse"})
-			case row.expandable:
-				head = append(head, keyHint{"→", "expand"})
-			default:
-				head = append(head, keyHint{"←", "parent"})
-			}
-			if s, ok := row.host.dsSnaps[row.ds.Name]; !ok || len(s) > 0 {
-				label := "snaps"
-				if m.snapsShown[row.id] {
-					label = "hide snaps"
-				}
-				head = append(head, keyHint{"t", label})
-			}
-			if dsMarkable(row) {
-				head = append(head, keyHint{"space", "select"})
-			}
-		case rFam:
-			if row.expanded {
-				head = append(head, keyHint{"←", "fold"})
-			} else {
-				head = append(head, keyHint{"→", "unfold"})
-			}
-			head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
-		case rSnap:
-			head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
-		}
-		if m.ackPending() > 0 {
-			head = append(head, keyHint{"a", "acks"})
+	if m.filterIn {
+		return []keyHint{{"", "type to filter…"}, {"↓", "results"},
+			{"enter", "keep"}, {"esc", "cancel"}}
+	}
+	row := m.treeSelected()
+	if m.inMarkContext(row) {
+		// the standard tail stays: / and s keep working with a selection open
+		return []keyHint{{"space", "toggle"}, {"esc", "clear all"},
+			{"/", "filter"}, {"s", "sort"}, {"q", "quit"}}
+	}
+	if m.filter != "" {
+		head := []keyHint{{"esc", "clear filter"}}
+		if m.filterMarkable(row) {
+			head = append(head, keyHint{"space", "select"})
 		}
 		return append(head, keyHint{"/", "filter"}, keyHint{"s", "sort"},
-			keyHint{"p", "perf"}, keyHint{"q", "quit"})
+			keyHint{"q", "quit"})
 	}
+	vLabel := "all checks"
+	if m.verboseDrives {
+		vLabel = "warns only"
+	}
+	var head []keyHint
+	switch row.kind {
+	case rOverview:
+		head = []keyHint{{"↓", "browse"}}
+	case rHost:
+		head = []keyHint{{"v", vLabel}}
+	case rPool:
+		if row.expanded {
+			head = append(head, keyHint{"←", "collapse"})
+		} else {
+			head = append(head, keyHint{"→", "expand"})
+		}
+		head = append(head, keyHint{"v", vLabel})
+	case rDataset:
+		switch {
+		case row.expanded:
+			head = append(head, keyHint{"←", "collapse"})
+		case row.expandable:
+			head = append(head, keyHint{"→", "expand"})
+		default:
+			head = append(head, keyHint{"←", "parent"})
+		}
+		if s, ok := row.host.dsSnaps[row.ds.Name]; !ok || len(s) > 0 {
+			label := "snaps"
+			if m.snapsShown[row.id] {
+				label = "hide snaps"
+			}
+			head = append(head, keyHint{"t", label})
+		}
+		if dsMarkable(row) {
+			head = append(head, keyHint{"space", "select"})
+		}
+	case rFam:
+		if row.expanded {
+			head = append(head, keyHint{"←", "fold"})
+		} else {
+			head = append(head, keyHint{"→", "unfold"})
+		}
+		head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
+	case rSnap:
+		head = append(head, keyHint{"space", "select"}, keyHint{"t", "hide snaps"})
+	}
+	if m.ackPending() > 0 {
+		head = append(head, keyHint{"a", "acks"})
+	}
+	return append(head, keyHint{"/", "filter"}, keyHint{"s", "sort"},
+		keyHint{"q", "quit"})
 }
 
 func cheatLine(m *Model, w int) string {

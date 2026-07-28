@@ -42,7 +42,6 @@ func main() {
 	vdrives := flag.Bool("vdrives", false, "show every drive's check ledger in --dump (the live v toggle)")
 	ackFile := flag.String("ack-file", "", "acknowledgement ledger `path` (default ~/.config/zfse/ack.conf)")
 	ackPopup := flag.Bool("ack-popup", false, "open the acknowledge popup in --dump")
-	perf := flag.String("perf", "", "pool ([host:]pool) whose performance screen to render for --dump")
 	flag.Parse()
 
 	specs, multi := resolveHosts(replays, hostFlags, *noDedupe)
@@ -231,11 +230,9 @@ func main() {
 				m.ApplyDryRun(host, target, text, err)
 			}
 		}
-		if *perf != "" {
-			host, pool := hostFor(*perf)
-			if !m.EnterPerfFor(host, pool) {
-				fail("pool not found: " + *perf)
-			}
+		// a selected pool row renders the live-engine blocks — feed them
+		// the same double-sampled perf surfaces the 2s tick would deliver
+		if host, pool, ok := m.SelectedPoolTarget(); ok {
 			src := srcOf(host)
 			txgs, dmuTx, zil, params, iostat, err := src.PerfTexts(ctx, pool)
 			m.ApplyPerf(host, pool, txgs, dmuTx, zil, params, iostat, err)

@@ -18,7 +18,7 @@ import (
 // (toggled per dataset with `t`), so there is no separate browsing mode —
 // one navigation surface, one cursor.
 
-const modePools = 0 // the tree screen; modePerf lives in perf.go
+const modePools = 0 // the tree screen — the one navigation surface
 
 const datasetsInterval = 10 * time.Second
 

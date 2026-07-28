@@ -61,7 +61,6 @@ type Model struct {
 	ackCur  int
 
 	perf     perfState
-	perfMem  map[string]string   // per-host remembered perf pool
 	perfPeak map[string][2]int64 // "host\x00pool" → (r, w) io high-water; the
 	// tall charts' ceiling ratchets for the life of the process so history
 	// rotating out of the ring can't reinflate the recent past
@@ -111,7 +110,6 @@ func New(specs []HostSpec, multiHost bool) *Model {
 		marks:        map[string]bool{},
 		acks:         map[string]string{},
 		ackPath:      defaultAckPath(),
-		perfMem:      map[string]string{},
 		perfPeak:     map[string][2]int64{},
 		fleetW:       map[string]int{},
 	}
@@ -621,11 +619,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case perfTickMsg:
-		if m.mode != modePerf {
+		// the chain lives only while the cursor still sits on its pool;
+		// stale generations stop dead (ensurePerf started a fresh chain)
+		if msg.gen != m.perf.gen {
+			return m, nil
+		}
+		if row := m.treeSelected(); row.kind != rPool || row.host != m.perf.host ||
+			row.pool.Name != m.perf.pool {
 			return m, nil
 		}
 		return m, tea.Batch(fetchPerf(m.perf.host, m.perf.pool),
-			tea.Tick(perfInterval, func(time.Time) tea.Msg { return perfTickMsg{} }))
+			tea.Tick(perfInterval, func(time.Time) tea.Msg { return perfTickMsg{msg.gen} }))
 
 	case tea.KeyMsg:
 		before := m.cursorMovedAt
@@ -633,6 +637,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// keys mutate marks/expansion/filter state mid-walk; the View that
 		// follows must rebuild from the final state
 		m.dirtyData()
+		// landing on a pool row arms its 2s perf collectors
+		cmd = tea.Batch(cmd, m.ensurePerf())
 		if m.cursorMovedAt != before {
 			// the panel is on hold; wake the renderer once the cursor settles
 			cmd = tea.Batch(cmd, tea.Tick(settleDelay+20*time.Millisecond,
@@ -651,15 +657,7 @@ func (m *Model) keyDispatch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ackKeys(msg.String())
 		return m, nil
 	}
-	switch m.mode {
-	case modePerf:
-		return m.perfKeys(msg)
-	default:
-		if msg.String() == "p" && !m.filterIn {
-			return m, m.enterPerf()
-		}
-		return m.treeKeys(msg)
-	}
+	return m.treeKeys(msg)
 }
 
 // ApplyDryRun stores a dry-run result for a target (dump helper).
