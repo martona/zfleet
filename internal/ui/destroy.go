@@ -28,7 +28,8 @@ import (
 // into the popup row and the selection inspector.
 
 const (
-	destroyIdle = iota
+	destroyIdle   = iota
+	destroyQueued // enter (or shift+F8) while the host is busy: next in line
 	destroyRunning
 	destroyDone
 	destroyFailed
@@ -48,6 +49,11 @@ type destroyRow struct {
 	blocked string // nonempty = shown but unexecutable, this is why
 	status  int
 	errText string // full failure output; the unfold shows all of it
+	// last known price, frozen across the destroy itself — the post-run
+	// refetch erases the data a live lookup would need, and the title's
+	// "reclaimed N/M" ledger must keep counting
+	reclaim     int64
+	haveReclaim bool
 }
 
 // cmdString is the exact command the row will execute — what the popup
@@ -100,7 +106,6 @@ func destroyKey(h *hostState, ds string) string { return h.name + "\x00" + ds }
 // the operator sees the whole selection, including what won't run.
 func (m *Model) OpenDestroyPopup() {
 	m.destroyRows = nil
-	m.destroyAll = false
 	for _, g := range m.markGroups() {
 		if g.h == nil {
 			continue
@@ -127,6 +132,9 @@ func (m *Model) OpenDestroyPopup() {
 				r.blocked = "no sudo"
 			}
 		}
+		if n, ok := rowReclaim(r); ok {
+			r.reclaim, r.haveReclaim = n, true
+		}
 		m.destroyRows = append(m.destroyRows, r)
 	}
 	m.destroyCur = 0
@@ -146,6 +154,65 @@ func rowReclaim(r destroyRow) (int64, bool) {
 	return dryReclaim(r.h.dryCache[r.target])
 }
 
+// destroySigma is the title's price ledger: untouched "reclaims ≥ X",
+// in flight "reclaimed done/total (freed/priced)" — the OBJECT counts make
+// partial completion unmistakable even when the byte totals agree (busy
+// snapshots can hold zero unique bytes) — and plain "reclaimed X" only at
+// 100% success. Prices freeze into the rows (a completed destroy erases
+// the data a live lookup needs); idle/queued rows keep refreshing while
+// late dry-runs land.
+func (m *Model) destroySigma() string {
+	runnable, done, objTotal, objDone := 0, 0, 0, 0
+	var total, freed int64
+	exact, started := true, false
+	for i := range m.destroyRows {
+		r := &m.destroyRows[i]
+		if r.blocked != "" {
+			continue
+		}
+		if r.status == destroyIdle || r.status == destroyQueued {
+			if n, ok := rowReclaim(*r); ok {
+				r.reclaim, r.haveReclaim = n, true
+			}
+		} else {
+			started = true
+		}
+		runnable++
+		objs := 1
+		if !r.dsMark {
+			objs = r.nsnaps
+		}
+		objTotal += objs
+		if r.haveReclaim {
+			total += r.reclaim
+		} else {
+			exact = false
+		}
+		if r.status == destroyDone {
+			done++
+			objDone += objs
+			freed += r.reclaim
+		}
+	}
+	ge := ""
+	if !exact {
+		ge = "≥ "
+	}
+	switch {
+	case !started:
+		return "reclaims " + ge + zfs.NiceBytes(total)
+	case done == runnable && runnable > 0:
+		return "reclaimed " + ge + zfs.NiceBytes(freed)
+	default:
+		geT := ""
+		if !exact {
+			geT = "≥"
+		}
+		return fmt.Sprintf("reclaimed %d/%d (%s/%s%s)", objDone, objTotal,
+			zfs.NiceBytes(freed), geT, zfs.NiceBytes(total))
+	}
+}
+
 type destroyDoneMsg struct {
 	host   string
 	target string
@@ -163,10 +230,16 @@ func execDestroy(h *hostState, target string, recursive, sudo bool) tea.Cmd {
 	}
 }
 
-// startRow launches one idle, unblocked row.
+// startRow launches one runnable row — or QUEUES it when its host is
+// already busy: one command in flight per host, the rest wait in line and
+// say so.
 func (m *Model) startRow(i int) tea.Cmd {
 	r := &m.destroyRows[i]
-	if r.status != destroyIdle || r.blocked != "" || m.hostRunning(r.h.name) {
+	if r.blocked != "" || (r.status != destroyIdle && r.status != destroyQueued) {
+		return nil
+	}
+	if m.hostRunning(r.h.name) {
+		r.status = destroyQueued
 		return nil
 	}
 	r.status = destroyRunning
@@ -183,11 +256,10 @@ func (m *Model) hostRunning(host string) bool {
 	return false
 }
 
-// startNextForHost continues the shift+F8 chain after a completion.
+// startNextForHost continues a host's queue after a completion.
 func (m *Model) startNextForHost(host string) tea.Cmd {
 	for i := range m.destroyRows {
-		if m.destroyRows[i].h.name == host && m.destroyRows[i].status == destroyIdle &&
-			m.destroyRows[i].blocked == "" {
+		if m.destroyRows[i].h.name == host && m.destroyRows[i].status == destroyQueued {
 			return m.startRow(i)
 		}
 	}
@@ -207,8 +279,7 @@ func (m *Model) destroyKeys(msg string) tea.Cmd {
 	case "enter":
 		return m.startRow(m.destroyCur)
 	case "f20", "shift+f8":
-		// the whammy: everything runnable, one command in flight per host
-		m.destroyAll = true
+		// the whammy: one command in flight per host, the rest queue
 		var cmds []tea.Cmd
 		for i := range m.destroyRows {
 			if c := m.startRow(i); c != nil {
@@ -217,10 +288,14 @@ func (m *Model) destroyKeys(msg string) tea.Cmd {
 		}
 		return tea.Batch(cmds...)
 	case "esc", "f8":
-		// closing stops the chain; in-flight commands finish and their
+		// closing empties the queues; in-flight commands finish and their
 		// results still land (unmark, refresh) — zfs has already been asked
+		for i := range m.destroyRows {
+			if m.destroyRows[i].status == destroyQueued {
+				m.destroyRows[i].status = destroyIdle
+			}
+		}
 		m.destroyPop = false
-		m.destroyAll = false
 	}
 	return nil
 }
@@ -261,9 +336,16 @@ func (m *Model) applyDestroyDone(msg destroyDoneMsg) tea.Cmd {
 		if row != nil {
 			row.status = destroyDone
 		}
-		// the destroyed things leave the selection
+		snapSet := map[string]bool{}
 		if isSnaps {
 			for _, s := range strings.Split(snapList, ",") {
+				snapSet[s] = true
+			}
+		}
+		m.restCursor(h, ds, isSnaps, snapSet)
+		// the destroyed things leave the selection
+		if isSnaps {
+			for s := range snapSet {
 				delete(m.marks, treeDsID(h, ds+"@"+s))
 			}
 		} else {
@@ -312,10 +394,56 @@ func (m *Model) applyDestroyDone(msg destroyDoneMsg) tea.Cmd {
 	if len(m.marks) > 0 {
 		cmds = append(cmds, m.markDebounce())
 	}
-	if m.destroyAll && m.destroyPop {
-		cmds = append(cmds, m.startNextForHost(msg.host))
-	}
+	cmds = append(cmds, m.startNextForHost(msg.host))
 	return tea.Batch(cmds...)
+}
+
+// restCursor: a destroy that knocks the cursor off its row must not dump
+// it on the overview — it comes to rest on the nearest surviving row
+// above the casualty. Runs against the pre-refetch row list, so the move
+// happens the instant the destroy lands, not when the data catches up.
+func (m *Model) restCursor(h *hostState, ds string, isSnaps bool, snaps map[string]bool) {
+	doomed := func(r treeRow) bool {
+		if r.host != h || r.ds == nil {
+			return false
+		}
+		if !isSnaps {
+			return r.ds.Name == ds || strings.HasPrefix(r.ds.Name, ds+"/")
+		}
+		switch r.kind {
+		case rSnap:
+			return r.ds.Name == ds && r.snap != nil && snaps[r.snap.Snap]
+		case rFam:
+			if r.ds.Name != ds || r.fam == nil || len(r.fam.Snaps) == 0 {
+				return false
+			}
+			for _, s := range r.fam.Snaps {
+				if !snaps[s.Snap] {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	rows := m.treeRows()
+	cur := -1
+	for i := range rows {
+		if rows[i].id == m.treeSel {
+			cur = i
+			break
+		}
+	}
+	if cur < 0 || !doomed(rows[cur]) {
+		return
+	}
+	for j := cur - 1; j >= 0; j-- {
+		if !doomed(rows[j]) {
+			m.treeSel = rows[j].id
+			m.cursorMovedAt = time.Now()
+			return
+		}
+	}
 }
 
 func firstLineOf(s string) string {
@@ -364,6 +492,21 @@ func hardWrap(s string, w int) []string {
 	return append(out, string(r))
 }
 
+// wrapErr prepares multi-line zfs stderr for the unfold: split on the REAL
+// newlines first (a grouped destroy errors once per snapshot), then
+// hard-wrap each line. Raw \n reaching the overlay body tears the frame
+// splice apart — every body entry must be exactly one line.
+func wrapErr(s string, w int) []string {
+	var out []string
+	for _, ln := range strings.Split(s, "\n") {
+		if ln = strings.TrimRight(ln, "\r"); ln == "" {
+			continue
+		}
+		out = append(out, hardWrap(ln, w)...)
+	}
+	return out
+}
+
 // destroyOverlay floats the popup over the frame — the ack overlay's
 // splice, grown wide: this surface earns near full frame width. The
 // highlighted row unfolds in place (full command wrapped, full error
@@ -377,22 +520,12 @@ func destroyOverlay(m *Model, frame string) string {
 	boxW := inner - 6
 	bodyW := boxW - 4 // "│ " + " │"
 
-	// title: the inventory and its price
+	// title: the inventory and its price ledger
 	snaps, dss := 0, 0
-	var sum int64
-	exact := true
 	for _, r := range m.destroyRows {
 		snaps += r.nsnaps
 		if r.dsMark {
 			dss++
-		}
-		if r.blocked != "" {
-			continue
-		}
-		if n, ok := rowReclaim(r); ok {
-			sum += n
-		} else {
-			exact = false
 		}
 	}
 	plural := func(n int, noun string) string {
@@ -408,11 +541,7 @@ func destroyOverlay(m *Model, frame string) string {
 	if dss > 0 {
 		parts = append(parts, plural(dss, "dataset")+" -r")
 	}
-	sigma := "reclaims " + zfs.NiceBytes(sum)
-	if !exact {
-		sigma = "reclaims ≥ " + zfs.NiceBytes(sum)
-	}
-	title := " F8 destroy · " + strings.Join(parts, " · ") + " · " + sigma + " "
+	title := " F8 destroy · " + strings.Join(parts, " · ") + " · " + m.destroySigma() + " "
 
 	// body: host headers + rows, the highlighted one unfolded
 	var body []string
@@ -440,6 +569,8 @@ func destroyOverlay(m *Model, frame string) string {
 		switch {
 		case r.status == destroyRunning:
 			right = styWarn.Render("running…")
+		case r.status == destroyQueued:
+			right = styDim.Render("queued")
 		case r.status == destroyDone:
 			right = styGood.Render("done")
 		case r.status == destroyFailed:
@@ -464,7 +595,7 @@ func destroyOverlay(m *Model, frame string) string {
 				body = append(body, styInv.Render(fit("  "+wl, bodyW)))
 			}
 			if r.status == destroyFailed && r.errText != "" {
-				for _, el := range hardWrap(r.errText, bodyW-4) {
+				for _, el := range wrapErr(r.errText, bodyW-4) {
 					body = append(body, "    "+styBad.Render(el))
 				}
 			}
@@ -521,7 +652,18 @@ func destroyOverlay(m *Model, frame string) string {
 	for _, l := range body {
 		box = append(box, "│ "+fit(l, bodyW)+" │")
 	}
-	box = append(box, "└"+rep("─", boxW-2)+"┘")
+	// the keys live on the popup itself — the frame's cheat line is a
+	// screen-height away from where the operator is looking
+	hint := func(key, label string) string {
+		return styInv.Render(" "+key+" ") + " " + styDim.Render(label)
+	}
+	hints := " " + hint("enter", "destroy one") + "  " + hint("⇧F8", "destroy ALL") +
+		"  " + hint("↑↓", "move") + "  " + hint("esc", "close") + " "
+	if hw := lipgloss.Width(hints); hw <= boxW-3 {
+		box = append(box, "└─"+hints+styDim.Render(rep("─", boxW-3-hw))+"┘")
+	} else {
+		box = append(box, "└"+rep("─", boxW-2)+"┘")
+	}
 
 	top := 3
 	if len(frameLines) > len(box)+6 {

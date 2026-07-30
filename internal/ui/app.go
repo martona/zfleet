@@ -66,7 +66,6 @@ type Model struct {
 	destroyPop  bool
 	destroyRows []destroyRow
 	destroyCur  int
-	destroyAll  bool // shift+F8 chains the next command per host
 	destroyErrs map[string]string
 
 	perf     perfState

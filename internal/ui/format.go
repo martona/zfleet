@@ -458,14 +458,19 @@ func commonPrefixLen(names []string) int {
 }
 
 // truncate shortens a plain string to w cells, keeping head and tail with a
-// middle ellipsis — device names carry their identity at both ends.
+// middle ellipsis — device names carry their identity at both ends. Total
+// over all widths: deep tree indents in a narrow pane produce negative
+// budgets, and a renderer must degrade to nothing, never panic.
 func truncate(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= w {
 		return s
 	}
-	if w <= 1 {
-		return string(r[:w])
+	if w == 1 {
+		return string(r[:1])
 	}
 	head := (w - 1) / 2
 	tail := w - 1 - head
