@@ -257,6 +257,7 @@ func (m *Model) clearMarks() {
 		m.marks = map[string]bool{}
 		m.markGen++
 	}
+	m.destroyErrs = map[string]string{} // failure notes die with the selection
 }
 
 // markGroup is one dataset's worth of selection — the unit the math runs

@@ -42,6 +42,7 @@ func main() {
 	vdrives := flag.Bool("vdrives", false, "show every drive's check ledger in --dump (the live v toggle)")
 	ackFile := flag.String("ack-file", "", "acknowledgement ledger `path` (default ~/.config/zfse/ack.conf)")
 	ackPopup := flag.Bool("ack-popup", false, "open the acknowledge popup in --dump")
+	destroyPopup := flag.Bool("destroy-popup", false, "open the F8 destroy popup over the --mark selection in --dump")
 	flag.Parse()
 
 	specs, multi := resolveHosts(replays, hostFlags, *noDedupe)
@@ -249,6 +250,9 @@ func main() {
 		m.SetVerboseDrives(*vdrives)
 		if *ackPopup {
 			m.OpenAckPopup()
+		}
+		if *destroyPopup {
+			m.OpenDestroyPopup()
 		}
 		m.SetSize(*width, *height)
 		fmt.Println(m.View())

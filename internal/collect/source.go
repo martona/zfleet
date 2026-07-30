@@ -53,6 +53,11 @@ type Source interface {
 	// ("ds@a,b,c") and returns its output. The -n flag is hardcoded; this
 	// never destroys anything.
 	DestroyDryRun(ctx context.Context, target string) (string, error)
+	// Destroy runs `zfs destroy` FOR REAL — the only destructive command
+	// in the tool. recursive adds -r (whole-dataset marks mean the
+	// subtree); sudo prefixes `sudo -n` for hosts where the probe granted
+	// it. The UI shows the operator this exact command before it runs.
+	Destroy(ctx context.Context, target string, recursive, sudo bool) (string, error)
 	// PerfTexts returns the kstat surfaces for one pool's perf blocks:
 	// txgs ring, dmu_tx counters, zil counters, module params. All
 	// instant file reads; vdev latency comes from IostatStream.
@@ -236,6 +241,20 @@ func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {
 	return string(out), err
 }
 
+func (Exec) Destroy(ctx context.Context, target string, recursive, sudo bool) (string, error) {
+	// no -f: a busy mount fails loudly instead of being force-unmounted
+	args := []string{"zfs", "destroy"}
+	if recursive {
+		args = append(args, "-r")
+	}
+	args = append(args, target)
+	if sudo {
+		args = append([]string{"sudo", "-n"}, args...)
+	}
+	out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+	return string(out), err
+}
+
 func (Exec) PerfTexts(ctx context.Context, pool string) (string, string, string, string, error) {
 	readFile := func(p string) string {
 		b, _ := os.ReadFile(p)
@@ -390,6 +409,13 @@ func (r Replay) SmartTexts(_ context.Context, nodes []string) (map[string]string
 
 func (Replay) DestroyDryRun(context.Context, string) (string, error) {
 	return "", errors.New("dry-run needs a live system")
+}
+
+// Destroy simulates success so the sick puppet can exercise the whole F8
+// surface; fixtures re-read on the next tick, so the "destroyed" data
+// calmly returns.
+func (Replay) Destroy(context.Context, string, bool, bool) (string, error) {
+	return "", nil
 }
 
 func (r Replay) PerfTexts(_ context.Context, pool string) (string, string, string, string, error) {

@@ -545,6 +545,10 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.verboseDrives = !m.verboseDrives
 	case "a":
 		m.OpenAckPopup()
+	case "f8":
+		if len(m.marks) > 0 {
+			m.OpenDestroyPopup()
+		}
 	case "esc":
 		switch {
 		case len(m.marks) > 0:

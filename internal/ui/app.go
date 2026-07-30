@@ -60,6 +60,15 @@ type Model struct {
 	ackList []ackEntry
 	ackCur  int
 
+	// F8 destroy: the popup rows survive a close so in-flight results can
+	// still land; destroyErrs carries failures into the selection
+	// inspector, keyed by mark-group ("host\x00ds")
+	destroyPop  bool
+	destroyRows []destroyRow
+	destroyCur  int
+	destroyAll  bool // shift+F8 chains the next command per host
+	destroyErrs map[string]string
+
 	perf     perfState
 	perfPeak map[string][2]int64 // "host\x00pool" → (r, w) io high-water; the
 	// tall charts' ceiling ratchets for the life of the process so history
@@ -117,6 +126,7 @@ func New(specs []HostSpec, multiHost bool, tuning Tuning) *Model {
 		snapsShown:   map[string]bool{},
 		marks:        map[string]bool{},
 		acks:         map[string]string{},
+		destroyErrs:  map[string]string{},
 		ackPath:      defaultAckPath(),
 		perfPeak:     map[string][2]int64{},
 		fleetW:       map[string]int{},
@@ -631,6 +641,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(m.markEnsureCmds()...)
 
+	case destroyDoneMsg:
+		cmd := m.applyDestroyDone(msg)
+		m.dirtyData()
+		return m, cmd
+
 	case dryRunMsg:
 		if h := m.hostByName(msg.host); h != nil {
 			if r := h.dryCache[msg.target]; r != nil {
@@ -693,6 +708,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) keyDispatch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.destroyPop {
+		if s := msg.String(); s == "q" || s == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, m.destroyKeys(msg.String())
+	}
 	if m.ackPop {
 		if s := msg.String(); s == "q" || s == "ctrl+c" {
 			return m, tea.Quit

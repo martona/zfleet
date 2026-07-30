@@ -179,6 +179,19 @@ func (s Ssh) DestroyDryRun(ctx context.Context, target string) (string, error) {
 	return s.runCombined(ctx, "zfs destroy -n -v -p "+quote(target))
 }
 
+func (s Ssh) Destroy(ctx context.Context, target string, recursive, sudo bool) (string, error) {
+	// the real one. No -f: a busy mount fails loudly.
+	cmd := "zfs destroy "
+	if recursive {
+		cmd += "-r "
+	}
+	cmd += quote(target)
+	if sudo {
+		cmd = "sudo -n " + cmd
+	}
+	return s.runCombined(ctx, cmd)
+}
+
 func (s Ssh) PerfTexts(ctx context.Context, pool string) (string, string, string, string, error) {
 	txgs, err := s.run(ctx, "cat "+quote("/proc/spl/kstat/zfs/"+pool+"/txgs"))
 	if err != nil && transportDown(err) {

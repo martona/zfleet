@@ -291,9 +291,20 @@ func selInspector(m *Model, w, off, height int) []string {
 				})
 			}
 		}
+		// an F8 casualty keeps its marks and wears its reason — the operator
+		// fixes the cause (hold, clone, busy mount) and presses F8 again
+		if g.h != nil {
+			if e := m.destroyErrs[destroyKey(g.h, g.ds)]; e != "" {
+				emit(func() string {
+					return "   └ " + styBad.Render("destroy failed: ") +
+						styDim.Render(truncate(e, w-24))
+				})
+			}
+		}
 	}
 	lines = append(lines, "",
-		" "+keyChip("space", "toggle")+styDim.Render(" · ")+keyChip("esc", "clear all"))
+		" "+keyChip("space", "toggle")+styDim.Render(" · ")+keyChip("F8", "destroy…")+
+			styDim.Render(" · ")+keyChip("esc", "clear all"))
 	return lines
 }
 

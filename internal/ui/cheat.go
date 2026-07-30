@@ -23,6 +23,10 @@ func (m *Model) cheatHints() []keyHint {
 }
 
 func (m *Model) cheatBase() []keyHint {
+	if m.destroyPop {
+		return []keyHint{{"enter", "destroy one"}, {"⇧F8", "destroy ALL"},
+			{"↑↓", "move"}, {"esc", "close"}}
+	}
 	if m.ackPop {
 		return []keyHint{{"enter", "ack"}, {"↑↓", "move"}, {"esc", "close"}}
 	}
@@ -33,7 +37,7 @@ func (m *Model) cheatBase() []keyHint {
 	row := m.treeSelected()
 	if m.inMarkContext(row) {
 		// the standard tail stays: / and s keep working with a selection open
-		return []keyHint{{"space", "toggle"}, {"esc", "clear all"},
+		return []keyHint{{"space", "toggle"}, {"F8", "destroy…"}, {"esc", "clear all"},
 			{"/", "filter"}, {"s", "sort"}, {"q", "quit"}}
 	}
 	if m.filter != "" {

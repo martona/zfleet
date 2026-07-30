@@ -89,6 +89,9 @@ func frame(m *Model) string {
 		b.WriteString("├" + rep("─", inner) + "┤\n")
 		b.WriteString("│" + fit(strip(m), inner) + "│\n")
 		b.WriteString(cheatBorder(m, inner))
+		if m.destroyPop {
+			return destroyOverlay(m, b.String())
+		}
 		if m.ackPop {
 			return ackOverlay(m, b.String())
 		}
@@ -179,6 +182,9 @@ func frame(m *Model) string {
 	b.WriteString("├" + rep("─", leftW) + "┴" + rep("─", rightW) + "┤\n")
 	b.WriteString("│" + fit(strip(m), m.w-2) + "│\n")
 	b.WriteString(cheatBorder(m, m.w-2))
+	if m.destroyPop {
+		return destroyOverlay(m, b.String())
+	}
 	if m.ackPop {
 		return ackOverlay(m, b.String())
 	}
