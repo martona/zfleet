@@ -45,7 +45,7 @@ func main() {
 	flag.Parse()
 
 	specs, multi := resolveHosts(replays, hostFlags, *noDedupe)
-	m := ui.New(specs, multi)
+	m := ui.New(specs, multi, readTuning())
 	m.SetAckFile(*ackFile)
 
 	// hostFor resolves an optional "host:" prefix on dump arguments,
@@ -335,6 +335,53 @@ func resolveHosts(replays, hostFlags multiFlag, noDedupe bool) ([]ui.HostSpec, b
 		fail("no usable hosts: local has no zfs and no remotes resolved")
 	}
 	return uniquifyNames(specs), true
+}
+
+// readTuning loads ~/.config/zfse/config: `key = duration` lines,
+// #-comments. Keys are the cadence knobs — bg-stats, bg-pools, bg-disks
+// (background collector intervals for hosts the cursor is not on),
+// promote (cursor dwell before a host goes foreground), demote (grace
+// before it drops back). Absent file = defaults; a bad key or duration
+// fails loudly rather than silently ignoring a typo.
+func readTuning() ui.Tuning {
+	t := ui.DefaultTuning()
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return t
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "zfse", "config"))
+	if err != nil {
+		return t
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			fail("config: not a key = value line: " + line)
+		}
+		d, err := time.ParseDuration(strings.TrimSpace(val))
+		if err != nil {
+			fail("config: " + err.Error())
+		}
+		switch strings.TrimSpace(key) {
+		case "bg-stats":
+			t.BgStats = d
+		case "bg-pools":
+			t.BgPools = d
+		case "bg-disks":
+			t.BgDisks = d
+		case "promote":
+			t.Promote = d
+		case "demote":
+			t.Demote = d
+		default:
+			fail("config: unknown key: " + strings.TrimSpace(key))
+		}
+	}
+	return t
 }
 
 // readHostsFile loads ~/.config/zfse/hosts: one ssh destination per line,

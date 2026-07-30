@@ -47,6 +47,15 @@ type hostState struct {
 	errText   string
 	lastErr   error
 
+	// cadence tier (tuning.go): the selection's host polls at full rate,
+	// the rest idle at background cadence behind these due gates
+	fg       bool
+	selLast  time.Time // last time the (dwelled) cursor sat on this host
+	statsDue time.Time
+	poolsDue time.Time
+	disksDue time.Time
+	dsDue    time.Time // expanded dataset trees
+
 	// identity, collected once per successful connect
 	haveInfo bool
 	osName   string

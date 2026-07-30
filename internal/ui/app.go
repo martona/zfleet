@@ -95,6 +95,9 @@ type Model struct {
 	// every host's iostat stream reader pushes its blocks here; one
 	// listener cmd drains it (stream.go)
 	streamCh chan tea.Msg
+
+	// collector cadence policy (tuning.go)
+	tuning Tuning
 }
 
 const settleDelay = 100 * time.Millisecond
@@ -105,9 +108,10 @@ func (m *Model) dirtyData() { m.rowsOK, m.groupsOK = false, false }
 
 type settleMsg struct{}
 
-func New(specs []HostSpec, multiHost bool) *Model {
+func New(specs []HostSpec, multiHost bool, tuning Tuning) *Model {
 	m := &Model{
 		multiHost:    multiHost,
+		tuning:       tuning,
 		treeSortUsed: true,
 		expanded:     map[string]bool{},
 		snapsShown:   map[string]bool{},
@@ -483,10 +487,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case diskTickMsg:
 		cmds := []tea.Cmd{tea.Tick(diskInterval, func(time.Time) tea.Msg { return diskTickMsg{} })}
+		now := time.Now()
 		for _, h := range m.hosts {
-			if h.diskPend || (h.conn == connDown && time.Now().Before(h.nextTry)) {
+			if h.diskPend || (h.conn == connDown && now.Before(h.nextTry)) || now.Before(h.disksDue) {
 				continue
 			}
+			h.disksDue = now.Add(h.cadence(diskInterval, m.tuning.BgDisks))
 			h.diskPend = true
 			cmds = append(cmds, fetchDisks(h))
 		}
@@ -494,10 +500,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case poolsTickMsg:
 		cmds := []tea.Cmd{tea.Tick(poolsInterval, func(time.Time) tea.Msg { return poolsTickMsg{} })}
+		now := time.Now()
 		for _, h := range m.hosts {
-			if h.poolsPend || (h.conn == connDown && time.Now().Before(h.nextTry)) {
+			if h.poolsPend || (h.conn == connDown && now.Before(h.nextTry)) || now.Before(h.poolsDue) {
 				continue
 			}
+			h.poolsDue = now.Add(h.cadence(poolsInterval, m.tuning.BgPools))
 			h.poolsPend = true
 			cmds = append(cmds, fetchPools(h))
 		}
@@ -505,10 +513,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statsTickMsg:
 		cmds := []tea.Cmd{tea.Tick(statsInterval, func(time.Time) tea.Msg { return statsTickMsg{} })}
+		// the fastest tick runs the tier state machine for everyone
+		selHost := m.treeSelected().host
+		dwelled := time.Since(m.cursorMovedAt) >= m.tuning.Promote
+		now := time.Now()
 		for _, h := range m.hosts {
-			if h.statsPend || (h.conn == connDown && time.Now().Before(h.nextTry)) {
+			h.tickTier(h == selHost, dwelled, now, m.tuning)
+			if h.statsPend || (h.conn == connDown && now.Before(h.nextTry)) || now.Before(h.statsDue) {
 				continue
 			}
+			h.statsDue = now.Add(h.cadence(statsInterval, m.tuning.BgStats))
 			h.statsPend = true
 			cmds = append(cmds, fetchStats(h))
 			if h.conn == connLive && !h.haveInfo && !h.infoPend {
@@ -571,10 +585,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				need[needKey{h, pool}] = true
 			}
 		}
+		now := time.Now()
 		for k := range need {
+			if now.Before(k.h.dsDue) {
+				continue // background host: expanded trees refresh lazily
+			}
 			if !k.h.dsTreesPend[k.pool] {
 				k.h.dsTreesPend[k.pool] = true
 				cmds = append(cmds, fetchDatasets(k.h, k.pool))
+			}
+		}
+		for k := range need {
+			if !k.h.fg && now.After(k.h.dsDue) {
+				k.h.dsDue = now.Add(m.tuning.BgPools)
 			}
 		}
 		// t-toggled snapshot lists stay live too — the toggle set is the
