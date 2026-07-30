@@ -82,6 +82,11 @@ type hostState struct {
 	ioText     string
 	hostIOHist []zfs.IORates // aggregate ring for the host row's sparklines
 
+	// per-vdev latency rings from the iostat stream, pool → device →
+	// samples. Host-owned and always warm: the pool panel's window is
+	// full history the moment the cursor arrives, not a cold start.
+	latHist map[string]map[string][]zfs.VdevLat
+
 	// per-dataset io from objset kstat deltas
 	dsIO       map[string]zfs.IORates
 	dsIOHist   map[string][]zfs.IORates
@@ -142,6 +147,7 @@ func newHostState(name, dest string, src collect.Source) *hostState {
 		bclone:        map[string]zfs.PoolBclone{},
 		io:            map[string]zfs.IORates{},
 		ioHist:        map[string][]zfs.IORates{},
+		latHist:       map[string]map[string][]zfs.VdevLat{},
 		dsIO:          map[string]zfs.IORates{},
 		dsIOHist:      map[string][]zfs.IORates{},
 		dsTrees:       map[string]*zfs.DatasetTree{},
@@ -540,6 +546,55 @@ func (h *hostState) subtreeIO(d *zfs.Dataset) (cur zfs.IORates, rh, wh []int64, 
 		}
 	}
 	return cur, rh, wh, loaded
+}
+
+// applyIostat ingests one stream block: pool bandwidth rows into the io
+// rings, vdev rows into every pool's latency rings. Blocks arriving before
+// the pool list are stashed as text; ApplyPoolData re-parses on arrival.
+func (h *hostState) applyIostat(text string) {
+	h.ioText = text
+	if len(h.pools) == 0 {
+		return
+	}
+	names := h.poolNames()
+	h.io = zfs.ParseIostatPools(text, names)
+	var agg zfs.IORates
+	for name, r := range h.io {
+		hist := append(h.ioHist[name], r)
+		if len(hist) > dsIOHistLen {
+			hist = hist[len(hist)-dsIOHistLen:]
+		}
+		h.ioHist[name] = hist
+		agg.RBw += r.RBw
+		agg.WBw += r.WBw
+	}
+	h.hostIOHist = append(h.hostIOHist, agg)
+	if len(h.hostIOHist) > dsIOHistLen {
+		h.hostIOHist = h.hostIOHist[len(h.hostIOHist)-dsIOHistLen:]
+	}
+	for _, p := range h.pools {
+		lat := zfs.ParseIostatLatency(text, p.Name, names)
+		if len(lat) == 0 {
+			continue
+		}
+		rings := h.latHist[p.Name]
+		if rings == nil {
+			rings = map[string][]zfs.VdevLat{}
+			h.latHist[p.Name] = rings
+		}
+		for dev, l := range lat {
+			ring := append(rings[dev], l)
+			if len(ring) > perfLatHistLen {
+				ring = ring[1:]
+			}
+			rings[dev] = ring
+		}
+	}
+	for pool := range h.latHist {
+		if !names[pool] {
+			delete(h.latHist, pool) // exported/destroyed pools drop their rings
+		}
+	}
 }
 
 // arcRate computes a per-second delta for an arcstats counter.

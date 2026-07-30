@@ -7,6 +7,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -19,10 +20,19 @@ import (
 type Source interface {
 	// PoolTexts returns `zpool status` and `zpool list -Hpv` output.
 	PoolTexts(ctx context.Context) (status, list string, err error)
-	// StatTexts returns arcstats kstat content, one pool-level
-	// `zpool iostat` sample, and the concatenated per-dataset objset
-	// kstats ("" when unavailable).
-	StatTexts(ctx context.Context) (arcstats, iostat, objsets string, err error)
+	// StatTexts returns arcstats kstat content and the concatenated
+	// per-dataset objset kstats ("" when unavailable). It doubles as the
+	// 2s connection heartbeat; iostat samples arrive via IostatStream.
+	StatTexts(ctx context.Context) (arcstats, objsets string, err error)
+	// IostatStream returns the raw output of a long-lived
+	// `zpool iostat -Hpvly -T u 2` covering all pools with per-vdev
+	// latency columns. Blocks are framed by `-T u` timestamp lines
+	// (bare epoch integers); consecutive timestamps occur (-y suppresses
+	// the boot sample but not its timestamp). The kernel times the
+	// intervals, so every sample is a true 2s window — no forked
+	// one-shots, no unobserved gaps between them. Close terminates the
+	// underlying process.
+	IostatStream(ctx context.Context) (io.ReadCloser, error)
 	// DatasetTexts returns wide `zfs list` output covering at least the
 	// given pool; parsers filter, so a superset is fine.
 	DatasetTexts(ctx context.Context, pool string) (string, error)
@@ -43,10 +53,10 @@ type Source interface {
 	// ("ds@a,b,c") and returns its output. The -n flag is hardcoded; this
 	// never destroys anything.
 	DestroyDryRun(ctx context.Context, target string) (string, error)
-	// PerfTexts returns the performance-screen surfaces for one pool:
-	// txgs ring, dmu_tx counters, zil counters, module params, and a
-	// per-vdev latency iostat sample.
-	PerfTexts(ctx context.Context, pool string) (txgs, dmuTx, zil, params, iostatL string, err error)
+	// PerfTexts returns the kstat surfaces for one pool's perf blocks:
+	// txgs ring, dmu_tx counters, zil counters, module params. All
+	// instant file reads; vdev latency comes from IostatStream.
+	PerfTexts(ctx context.Context, pool string) (txgs, dmuTx, zil, params string, err error)
 	// PoolProps returns `zpool get -Hp ashift,bcloneused,bclonesaved`
 	// output. Parsers pick their lines by property name, so fixtures
 	// captured before a property joined the list simply lack it.
@@ -69,9 +79,7 @@ type Source interface {
 	Name() string
 }
 
-// Exec runs zpool on the local host. One-shot `iostat -Hpy 1 1` is used
-// instead of a long-lived stream: -H mode has no sample framing, and a
-// self-contained true-rate sample (~1s) per poll needs none.
+// Exec runs zpool on the local host.
 type Exec struct{}
 
 func (Exec) Name() string { return "live" }
@@ -88,7 +96,7 @@ func (Exec) PoolTexts(ctx context.Context) (string, string, error) {
 	return string(status), string(list), nil
 }
 
-func (Exec) StatTexts(ctx context.Context) (string, string, string, error) {
+func (Exec) StatTexts(ctx context.Context) (string, string, error) {
 	arc, err := os.ReadFile("/proc/spl/kstat/zfs/arcstats")
 	if err != nil {
 		arc = nil // non-Linux or odd setup: ARC segment will show as unknown
@@ -101,11 +109,11 @@ func (Exec) StatTexts(ctx context.Context) (string, string, string, error) {
 			}
 		}
 	}
-	iostat, err := exec.CommandContext(ctx, "zpool", "iostat", "-Hpy", "1", "1").Output()
-	if err != nil {
-		return string(arc), "", objsets.String(), err
-	}
-	return string(arc), string(iostat), objsets.String(), nil
+	return string(arc), objsets.String(), nil
+}
+
+func (Exec) IostatStream(ctx context.Context) (io.ReadCloser, error) {
+	return streamCmd(exec.CommandContext(ctx, "zpool", "iostat", "-Hpvly", "-T", "u", "2"))
 }
 
 func (Exec) DatasetTexts(ctx context.Context, pool string) (string, error) {
@@ -228,7 +236,7 @@ func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {
 	return string(out), err
 }
 
-func (Exec) PerfTexts(ctx context.Context, pool string) (string, string, string, string, string, error) {
+func (Exec) PerfTexts(ctx context.Context, pool string) (string, string, string, string, error) {
 	readFile := func(p string) string {
 		b, _ := os.ReadFile(p)
 		return string(b)
@@ -247,8 +255,7 @@ func (Exec) PerfTexts(ctx context.Context, pool string) (string, string, string,
 			params.WriteString(full + ":" + strings.TrimSpace(string(b)) + "\n")
 		}
 	}
-	iostat, err := exec.CommandContext(ctx, "zpool", "iostat", "-Hpvly", pool, "1", "1").Output()
-	return txgs, dmuTx, zil, params.String(), string(iostat), err
+	return txgs, dmuTx, zil, params.String(), nil
 }
 
 // Replay serves recorded fixture files from a directory, so the TUI runs
@@ -274,14 +281,22 @@ func (r Replay) PoolTexts(context.Context) (string, string, error) {
 	return status, list, nil
 }
 
-func (r Replay) StatTexts(context.Context) (string, string, string, error) {
-	arc, _ := r.read("arcstats.out")
+func (r Replay) StatTexts(context.Context) (string, string, error) {
+	arc, err := r.read("arcstats.out")
 	objsets, _ := r.read("objset-all.out") // absent in pre-v2 fixture dirs
-	iostat, err := r.read("zpool-iostat-Hpv.out")
-	if err != nil {
-		return arc, "", objsets, err
+	return arc, objsets, err
+}
+
+func (r Replay) IostatStream(context.Context) (io.ReadCloser, error) {
+	// one synthetic block: the latency capture first (only it has the
+	// ≥17-column rows the latency parser sees), then the all-pools sample
+	// whose 7-column rows win the pool-io parse by coming last
+	hpvly, _ := r.read("zpool-iostat-Hpvly.out")
+	hpv, err := r.read("zpool-iostat-Hpv.out")
+	if err != nil && hpvly == "" {
+		return nil, err
 	}
-	return arc, iostat, objsets, nil
+	return io.NopCloser(strings.NewReader(hpvly + "\n" + hpv)), nil
 }
 
 // Replay fixture files cover all pools/datasets at once; parsers filter.
@@ -377,14 +392,13 @@ func (Replay) DestroyDryRun(context.Context, string) (string, error) {
 	return "", errors.New("dry-run needs a live system")
 }
 
-func (r Replay) PerfTexts(_ context.Context, pool string) (string, string, string, string, string, error) {
+func (r Replay) PerfTexts(_ context.Context, pool string) (string, string, string, string, error) {
 	txgs, err := r.read("txgs-" + pool + ".out")
 	if err != nil {
-		return "", "", "", "", "", err
+		return "", "", "", "", err
 	}
 	dmuTx, _ := r.read("dmu-tx.out")
 	zil, _ := r.read("zil.out")
 	params, _ := r.read("zfs-params.out")
-	iostat, _ := r.read("zpool-iostat-Hpvly.out")
-	return txgs, dmuTx, zil, params, iostat, nil
+	return txgs, dmuTx, zil, params, nil
 }

@@ -91,6 +91,10 @@ type Model struct {
 	// settle-hold: the right panel stays blank while the cursor is in
 	// flight and populates once it has been still for a beat
 	cursorMovedAt time.Time
+
+	// every host's iostat stream reader pushes its blocks here; one
+	// listener cmd drains it (stream.go)
+	streamCh chan tea.Msg
 }
 
 const settleDelay = 100 * time.Millisecond
@@ -112,6 +116,7 @@ func New(specs []HostSpec, multiHost bool) *Model {
 		ackPath:      defaultAckPath(),
 		perfPeak:     map[string][2]int64{},
 		fleetW:       map[string]int{},
+		streamCh:     make(chan tea.Msg, 32),
 	}
 	for _, s := range specs {
 		h := newHostState(s.Name, s.Dest, s.Src)
@@ -150,7 +155,6 @@ type poolsDataMsg struct {
 type statsDataMsg struct {
 	host       string
 	arcText    string
-	ioText     string
 	objsetText string
 	uptime     string
 	loadavg    string
@@ -201,8 +205,8 @@ func fetchStats(h *hostState) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		arc, iostat, objsets, err := src.StatTexts(ctx)
-		msg := statsDataMsg{host: host, arcText: arc, ioText: iostat, objsetText: objsets, err: err}
+		arc, objsets, err := src.StatTexts(ctx)
+		msg := statsDataMsg{host: host, arcText: arc, objsetText: objsets, err: err}
 		if err == nil {
 			msg.uptime, msg.loadavg, msg.procStat, msg.hwmon = src.HostTexts(ctx)
 		}
@@ -244,10 +248,12 @@ func (m *Model) Init() tea.Cmd {
 		tea.Tick(statsInterval, func(time.Time) tea.Msg { return statsTickMsg{} }),
 		tea.Tick(datasetsInterval, func(time.Time) tea.Msg { return datasetsTickMsg{} }),
 		tea.Tick(diskInterval, func(time.Time) tea.Msg { return diskTickMsg{} }),
+		m.listenIostat(),
 	}
 	for _, h := range m.hosts {
 		h.poolsPend, h.statsPend, h.infoPend, h.diskPend = true, true, true, true
-		cmds = append(cmds, fetchPools(h), fetchStats(h), fetchInfo(h), fetchDisks(h))
+		cmds = append(cmds, fetchPools(h), fetchStats(h), fetchInfo(h), fetchDisks(h),
+			readIostat(h, m.streamCh))
 	}
 	return tea.Batch(cmds...)
 }
@@ -287,7 +293,7 @@ func (m *Model) ApplyAuxPools(host, rootsText, propsText string) {
 }
 
 // ApplyStatData ingests raw stat text for a host (also used by --dump).
-func (m *Model) ApplyStatData(host, arcText, ioText, objsetText string) {
+func (m *Model) ApplyStatData(host, arcText, objsetText string) {
 	h := m.hostByName(host)
 	if h == nil {
 		return
@@ -305,26 +311,15 @@ func (m *Model) ApplyStatData(host, arcText, ioText, objsetText string) {
 			}
 		}
 	}
-	h.ioText = ioText
-	if len(h.pools) > 0 {
-		h.io = zfs.ParseIostatPools(ioText, h.poolNames())
-		var agg zfs.IORates
-		for name, r := range h.io {
-			hist := append(h.ioHist[name], r)
-			if len(hist) > dsIOHistLen {
-				hist = hist[len(hist)-dsIOHistLen:]
-			}
-			h.ioHist[name] = hist
-			agg.RBw += r.RBw
-			agg.WBw += r.WBw
-		}
-		h.hostIOHist = append(h.hostIOHist, agg)
-		if len(h.hostIOHist) > dsIOHistLen {
-			h.hostIOHist = h.hostIOHist[len(h.hostIOHist)-dsIOHistLen:]
-		}
-	}
 	if objsetText != "" {
 		h.applyObjsets(zfs.ParseObjsets(objsetText))
+	}
+}
+
+// ApplyIostat ingests one iostat stream block (also used by --dump).
+func (m *Model) ApplyIostat(host, text string) {
+	if h := m.hostByName(host); h != nil {
+		h.applyIostat(text)
 	}
 }
 
@@ -438,9 +433,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		h.noteStatsOK()
-		m.ApplyStatData(msg.host, msg.arcText, msg.ioText, msg.objsetText)
+		m.ApplyStatData(msg.host, msg.arcText, msg.objsetText)
 		h.applyVitals(msg.uptime, msg.loadavg, msg.procStat, msg.hwmon)
 		return m, nil
+
+	case iostatBlockMsg:
+		if h := m.hostByName(msg.host); h != nil {
+			h.applyIostat(msg.text)
+		}
+		return m, m.listenIostat()
+
+	case iostatDownMsg:
+		// quiet death — the stats heartbeat owns conn state; just respawn
+		// after a beat (replay streams EOF by design and re-read on retry)
+		host := msg.host
+		return m, tea.Tick(streamRetry, func(time.Time) tea.Msg { return iostatRetryMsg{host} })
+
+	case iostatRetryMsg:
+		h := m.hostByName(msg.host)
+		if h == nil {
+			return m, nil
+		}
+		if h.conn == connDown && time.Now().Before(h.nextTry) {
+			// respect the stats heartbeat's backoff — a dark host gets no
+			// extra ssh attempts from the stream chain
+			host := msg.host
+			return m, tea.Tick(streamRetry, func(time.Time) tea.Msg { return iostatRetryMsg{host} })
+		}
+		return m, readIostat(h, m.streamCh)
 
 	case infoMsg:
 		h := m.hostByName(msg.host)

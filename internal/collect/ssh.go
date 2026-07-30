@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -126,22 +127,26 @@ func (s Ssh) PoolTexts(ctx context.Context) (string, string, error) {
 	return status, list, nil
 }
 
-func (s Ssh) StatTexts(ctx context.Context) (string, string, string, error) {
+func (s Ssh) StatTexts(ctx context.Context) (string, string, error) {
 	arc, err := s.run(ctx, "cat /proc/spl/kstat/zfs/arcstats")
-	if err != nil && transportDown(err) {
-		return "", "", "", err
-	}
-	objsets, _ := s.run(ctx, "cat /proc/spl/kstat/zfs/*/objset-* 2>/dev/null")
-	iostat, err := s.run(ctx, "zpool iostat -Hpy 1 1")
 	if err != nil {
 		if transportDown(err) {
-			return arc, "", objsets, err
+			return "", "", err
 		}
-		// any command-level failure — zpool missing, module not loaded —
+		// any command-level failure — module not loaded, no zfs at all —
 		// is not an outage: the stats heartbeat answers for the HOST
-		return arc, "", objsets, nil
+		arc = ""
 	}
-	return arc, iostat, objsets, nil
+	objsets, _ := s.run(ctx, "cat /proc/spl/kstat/zfs/*/objset-* 2>/dev/null")
+	return arc, objsets, nil
+}
+
+func (s Ssh) IostatStream(ctx context.Context) (io.ReadCloser, error) {
+	// one persistent ssh channel streams every pool's samples; the mux
+	// master makes it cheap, Pdeathsig on the local client takes the
+	// remote command down with us
+	args := append(sshArgs(s.Dest), "zpool iostat -Hpvly -T u 2")
+	return streamCmd(exec.CommandContext(ctx, "ssh", args...))
 }
 
 func (s Ssh) DatasetTexts(ctx context.Context, pool string) (string, error) {
@@ -174,17 +179,16 @@ func (s Ssh) DestroyDryRun(ctx context.Context, target string) (string, error) {
 	return s.runCombined(ctx, "zfs destroy -n -v -p "+quote(target))
 }
 
-func (s Ssh) PerfTexts(ctx context.Context, pool string) (string, string, string, string, string, error) {
+func (s Ssh) PerfTexts(ctx context.Context, pool string) (string, string, string, string, error) {
 	txgs, err := s.run(ctx, "cat "+quote("/proc/spl/kstat/zfs/"+pool+"/txgs"))
 	if err != nil && transportDown(err) {
-		return "", "", "", "", "", err
+		return "", "", "", "", err
 	}
 	dmuTx, _ := s.run(ctx, "cat /proc/spl/kstat/zfs/dmu_tx")
 	// newer kmods have per-pool zil kstats; fall back to the global one
 	zil, _ := s.run(ctx, "cat "+quote("/proc/spl/kstat/zfs/"+pool+"/zil")+" 2>/dev/null || cat /proc/spl/kstat/zfs/zil")
 	params, _ := s.run(ctx, "grep -H . /sys/module/zfs/parameters/zfs_dirty_data_max /sys/module/zfs/parameters/zfs_delay_min_dirty_percent /sys/module/zfs/parameters/zfs_dirty_data_sync_percent")
-	iostat, err := s.run(ctx, "zpool iostat -Hpvly "+quote(pool)+" 1 1")
-	return txgs, dmuTx, zil, params, iostat, err
+	return txgs, dmuTx, zil, params, nil
 }
 
 func (s Ssh) HostTexts(ctx context.Context) (string, string, string, string) {

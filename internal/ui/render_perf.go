@@ -612,9 +612,9 @@ func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	if a, ok := h.ashift[p.Name]; ok {
 		headCell = "ashift " + strconv.Itoa(a)
 	}
-	if secs := len(m.perf.latHist); secs > 0 {
+	if rings := m.perfLatRings(); len(rings) > 0 {
 		win := 0
-		for _, ring := range m.perf.latHist {
+		for _, ring := range rings {
 			if len(ring) > win {
 				win = len(ring)
 			}

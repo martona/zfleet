@@ -12,9 +12,11 @@ import (
 // The pool view's live-performance substrate. Since the great unification
 // there is no performance MODE — the tree's pool panel is the one pool
 // view — so these collectors simply arm while the cursor sits on a pool
-// row: txg ring, dmu_tx/zil counters, module params, per-vdev latency at
-// the 2s tick. Leaving the pool lets the tick chain lapse; a generation
-// counter keeps a stale chain from double-firing when the cursor returns.
+// row: txg ring, dmu_tx/zil counters, module params at the 2s tick — all
+// instant /proc reads, so ticks can never outrun their fetches. Per-vdev
+// latency rides the host's iostat stream instead (stream.go). Leaving the
+// pool lets the tick chain lapse; a generation counter keeps a stale chain
+// from double-firing when the cursor returns.
 
 const perfInterval = 2 * time.Second
 
@@ -32,11 +34,13 @@ type perfState struct {
 	zil       map[string]int64
 	zilPrev   map[string]int64
 	params    map[string]int64
-	lat       map[string]zfs.VdevLat
-	latHist   map[string][]zfs.VdevLat // per-device ring; windowed view
 	err       string
 	have      bool
 }
+
+// Vdev latency is NOT here: the iostat stream feeds host-owned rings
+// (hostState.latHist) for every pool continuously, so the window is
+// already warm when the cursor arrives and survives pool switches.
 
 // ~60s of samples at the 2s tick — enough to separate a persistent
 // straggler from rotating GC noise.
@@ -73,7 +77,6 @@ type perfMsg struct {
 	dmuTx  string
 	zil    string
 	params string
-	iostat string
 	err    error
 }
 type perfTickMsg struct{ gen int }
@@ -86,9 +89,9 @@ func fetchPerf(h *hostState, pool string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		txgs, dmuTx, zil, params, iostat, err := src.PerfTexts(ctx, pool)
+		txgs, dmuTx, zil, params, err := src.PerfTexts(ctx, pool)
 		return perfMsg{host: host, pool: pool, txgs: txgs, dmuTx: dmuTx, zil: zil,
-			params: params, iostat: iostat, err: err}
+			params: params, err: err}
 	}
 }
 
@@ -127,18 +130,16 @@ func (m *Model) applyPerf(msg perfMsg) {
 	if p := zfs.ParseParams(msg.params); len(p) > 0 {
 		m.perf.params = p
 	}
-	m.perf.lat = zfs.ParseIostatLatency(msg.iostat, m.perf.pool, m.perf.host.poolNames())
-	if m.perf.latHist == nil {
-		m.perf.latHist = map[string][]zfs.VdevLat{}
-	}
-	for name, l := range m.perf.lat {
-		ring := append(m.perf.latHist[name], l)
-		if len(ring) > perfLatHistLen {
-			ring = ring[1:]
-		}
-		m.perf.latHist[name] = ring
-	}
 	m.perf.have = true
+}
+
+// perfLatRings returns the armed pool's device rings from the host-owned
+// stream history.
+func (m *Model) perfLatRings() map[string][]zfs.VdevLat {
+	if m.perf.host == nil {
+		return nil
+	}
+	return m.perf.host.latHist[m.perf.pool]
 }
 
 // latWindow reduces a device's ring to op-weighted column averages — each
@@ -147,7 +148,7 @@ func (m *Model) applyPerf(msg perfMsg) {
 // sparse-burst drives). The worst single-sample write-total stays as the
 // peak, un-averaged on purpose.
 func (m *Model) latWindow(name string) (avg zfs.VdevLat, peakW int64, samples int) {
-	ring := m.perf.latHist[name]
+	ring := m.perfLatRings()[name]
 	if len(ring) == 0 {
 		return zfs.VdevLat{TotalR: -1, TotalW: -1, DiskR: -1, DiskW: -1,
 			SyncQR: -1, SyncQW: -1, AsyncQR: -1, AsyncQW: -1}, -1, 0
@@ -174,12 +175,12 @@ func (m *Model) SelectedPoolTarget() (host, pool string, ok bool) {
 
 // ApplyPerf ingests raw perf texts outside the tea loop (dump helper); it
 // pins the cache identity first so the pool panel renders the blocks.
-func (m *Model) ApplyPerf(host, pool, txgs, dmuTx, zil, params, iostat string, err error) {
+func (m *Model) ApplyPerf(host, pool, txgs, dmuTx, zil, params string, err error) {
 	if h := m.hostByName(host); h != nil && (m.perf.host != h || m.perf.pool != pool) {
 		m.perf = perfState{host: h, pool: pool}
 	}
 	m.applyPerf(perfMsg{host: host, pool: pool, txgs: txgs, dmuTx: dmuTx, zil: zil,
-		params: params, iostat: iostat, err: err})
+		params: params, err: err})
 }
 
 // perfRate computes a per-second delta for a counter across the last two

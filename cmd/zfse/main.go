@@ -98,8 +98,11 @@ func main() {
 			roots, _ := s.Src.RootTexts(ctx)
 			poolProps, _ := s.Src.PoolProps(ctx)
 			m.ApplyAuxPools(s.Name, roots, poolProps)
-			if arc, iostat, objsets, err := s.Src.StatTexts(ctx); err == nil {
-				m.ApplyStatData(s.Name, arc, iostat, objsets)
+			if arc, objsets, err := s.Src.StatTexts(ctx); err == nil {
+				m.ApplyStatData(s.Name, arc, objsets)
+			}
+			for _, b := range iostatBlocks(s.Src, 1, 6*time.Second) {
+				m.ApplyIostat(s.Name, b)
 			}
 			al, sysBlock, lsblk, hwmonDev := s.Src.DiskTexts(ctx)
 			m.ApplyDisks(s.Name, al, sysBlock, lsblk, hwmonDev)
@@ -119,8 +122,8 @@ func main() {
 			// second sample so rate-based readouts are real, not blank
 			time.Sleep(1200 * time.Millisecond)
 			for _, s := range specs {
-				if arc, iostat, objsets, err := s.Src.StatTexts(ctx); err == nil {
-					m.ApplyStatData(s.Name, arc, iostat, objsets)
+				if arc, objsets, err := s.Src.StatTexts(ctx); err == nil {
+					m.ApplyStatData(s.Name, arc, objsets)
 					up, load, stat, hwmon := s.Src.HostTexts(ctx)
 					m.ApplyHostVitals(s.Name, up, load, stat, hwmon)
 				}
@@ -232,14 +235,15 @@ func main() {
 		}
 		// a selected pool row renders the live-engine blocks — feed them
 		// the same double-sampled perf surfaces the 2s tick would deliver
+		// (vdev latency already arrived via the per-host iostat block)
 		if host, pool, ok := m.SelectedPoolTarget(); ok {
 			src := srcOf(host)
-			txgs, dmuTx, zil, params, iostat, err := src.PerfTexts(ctx, pool)
-			m.ApplyPerf(host, pool, txgs, dmuTx, zil, params, iostat, err)
+			txgs, dmuTx, zil, params, err := src.PerfTexts(ctx, pool)
+			m.ApplyPerf(host, pool, txgs, dmuTx, zil, params, err)
 			if !strings.HasPrefix(src.Name(), "replay") {
 				time.Sleep(1200 * time.Millisecond)
-				txgs, dmuTx, zil, params, iostat, err = src.PerfTexts(ctx, pool)
-				m.ApplyPerf(host, pool, txgs, dmuTx, zil, params, iostat, err)
+				txgs, dmuTx, zil, params, err = src.PerfTexts(ctx, pool)
+				m.ApplyPerf(host, pool, txgs, dmuTx, zil, params, err)
 			}
 		}
 		m.SetVerboseDrives(*vdrives)
@@ -393,6 +397,26 @@ func uniquifyNames(specs []ui.HostSpec) []ui.HostSpec {
 		}
 	}
 	return specs
+}
+
+// iostatBlocks reads up to n sample blocks from a source's iostat stream
+// for the one-shot dump path, giving up at the deadline. Replay streams EOF
+// after their fixture block; a live stream's first kernel-timed sample
+// lands in ~2s.
+func iostatBlocks(src collect.Source, n int, wait time.Duration) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	rc, err := src.IostatStream(ctx)
+	if err != nil {
+		return nil
+	}
+	defer rc.Close()
+	var out []string
+	collect.ScanIostatBlocks(rc, func(block string) bool {
+		out = append(out, block)
+		return len(out) < n
+	})
+	return out
 }
 
 func fail(msg string) {
