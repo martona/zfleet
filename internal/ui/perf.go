@@ -26,7 +26,9 @@ type perfState struct {
 	gen  int // tick-chain generation; stale chains see a mismatch and stop
 
 	txgs      []zfs.TxgRow // the kstat ring as last read (~100 rows)
-	txgHist   []zfs.TxgRow // committed txgs banked across ticks for the chart
+	dirtyWin  []int64      // dirty chart: peak ndirty per wall-clock window
+	dirtyTxg  int64        // newest txg banked into dirtyWin
+	dirtyIdx  int64        // window index of dirtyWin's last entry
 	dmu       map[string]int64
 	dmuPrev   map[string]int64
 	dmuAt     time.Time
@@ -46,28 +48,42 @@ type perfState struct {
 // straggler from rotating GC noise.
 const perfLatHistLen = 30
 
-// The kernel's txg ring (zfs_txg_history) holds only ~100 rows; the dirty
-// chart banks committed txgs across ticks to chart deeper than that.
-const perfTxgAccum = 512
+// ~17 minutes of dirty-chart windows at the 2s interval.
+const perfDirtyWinCap = 512
 
-// mergeTxgs banks newly committed txgs from a ring read into the
-// accumulated history. Dedupe is by txg number — the ring overlaps almost
-// entirely between ticks; rows still open/quiescing get banked on a later
-// read, once committed.
-func mergeTxgs(hist, ring []zfs.TxgRow, cap int) []zfs.TxgRow {
-	last := int64(-1)
-	if len(hist) > 0 {
-		last = hist[len(hist)-1].Txg
-	}
+// bankDirty folds newly committed txgs into the dirty chart's TIME-indexed
+// ring: one slot per collector interval of wall clock, bucketed by txg
+// birth timestamp, value = PEAK ndirty among the window's txgs (peak, not
+// mean — the delay/max waterlines are thresholds, and a window crosses one
+// iff some real txg did; averaging could hide a throttle hit). -1 marks a
+// window no txg committed in (renders blank). Dedupe is by txg number: the
+// kernel ring overlaps almost entirely between reads, and its ~100 rows of
+// birth times backfill the axis on the first read, so the chart starts
+// warm. A txg storm collapses into few columns instead of racing the
+// chart; idle heartbeats march at the same wall speed as everything else.
+func bankDirty(win []int64, lastTxg, lastIdx int64, ring []zfs.TxgRow, max int) ([]int64, int64, int64) {
+	winNS := int64(perfInterval / time.Nanosecond)
 	for _, r := range ring {
-		if r.State == "C" && r.Txg > last {
-			hist = append(hist, r)
+		if r.State != "C" || r.Txg <= lastTxg {
+			continue
 		}
+		idx := r.Birth / winNS
+		switch {
+		case len(win) == 0 || idx > lastIdx:
+			for g := int64(0); len(win) > 0 && g < idx-lastIdx-1 && g < int64(max); g++ {
+				win = append(win, -1)
+			}
+			win = append(win, r.NDirty)
+			lastIdx = idx
+		case r.NDirty > win[len(win)-1]:
+			win[len(win)-1] = r.NDirty
+		}
+		lastTxg = r.Txg
 	}
-	if len(hist) > cap {
-		hist = hist[len(hist)-cap:]
+	if len(win) > max {
+		win = win[len(win)-max:]
 	}
-	return hist
+	return win, lastTxg, lastIdx
 }
 
 type perfMsg struct {
@@ -123,7 +139,8 @@ func (m *Model) applyPerf(msg perfMsg) {
 		m.perf.err = ""
 	}
 	m.perf.txgs = zfs.ParseTxgs(msg.txgs)
-	m.perf.txgHist = mergeTxgs(m.perf.txgHist, m.perf.txgs, perfTxgAccum)
+	m.perf.dirtyWin, m.perf.dirtyTxg, m.perf.dirtyIdx = bankDirty(
+		m.perf.dirtyWin, m.perf.dirtyTxg, m.perf.dirtyIdx, m.perf.txgs, perfDirtyWinCap)
 	m.perf.dmuPrev, m.perf.dmu = m.perf.dmu, zfs.ParseKstatMap(msg.dmuTx)
 	m.perf.dmuPrevAt, m.perf.dmuAt = m.perf.dmuAt, time.Now()
 	m.perf.zilPrev, m.perf.zil = m.perf.zil, zfs.ParseKstatMap(msg.zil)

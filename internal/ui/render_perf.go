@@ -242,26 +242,39 @@ func arcLines(h *hostState, rollHit string, memThrottle float64, noGrow bool, li
 
 // dirtyChartLines renders the dirty-vs-dirty_data_max chart: fixed
 // geometry claimed from the first frame, the delay line ruled across,
-// columns crossing it wearing warn above the line.
+// columns crossing it wearing warn above the line. The x-axis is WALL
+// TIME — one column per 2s window, peak ndirty of its txgs — so the chart
+// scrolls uniformly whether txgs are 5s heartbeats or a recv-driven storm;
+// windows with no committed txg are blank.
 func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate float64, lines *[]string) {
 	// prefix 8 aligns the chart's left edge with the "a" of "avg" above it
 	const chartH, prefixW, scaleLbl = 4, 8, 17
-	txgRows := m.perf.txgHist
+	win := m.perf.dirtyWin
 	chartW := w - prefixW - scaleLbl
 	if chartW < 20 {
 		chartW = 20
 	}
-	if len(txgRows) > 2*chartW {
-		txgRows = txgRows[len(txgRows)-2*chartW:]
+	if len(win) > 2*chartW {
+		win = win[len(win)-2*chartW:]
 	}
-	dsum := zfs.SummarizeTxgs(txgRows, len(txgRows))
-	scale := dirtyMax
-	if scale <= 0 {
-		for _, r := range txgRows {
-			if r.NDirty > scale {
-				scale = r.NDirty
-			}
+	var avgSum, avgN, peak, scale int64
+	for _, v := range win {
+		if v < 0 {
+			continue
 		}
+		avgSum += v
+		avgN++
+		if v > peak {
+			peak = v
+		}
+	}
+	dirtyAvg := int64(0)
+	if avgN > 0 {
+		dirtyAvg = avgSum / avgN
+	}
+	scale = dirtyMax
+	if scale <= 0 {
+		scale = peak
 	}
 	throt := fmt.Sprintf("%.1f delays/s", delayRate)
 	throtSty := styDim.Render
@@ -269,10 +282,11 @@ func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate floa
 		throtSty = styWarn.Render
 	}
 	*lines = append(*lines, " "+styBold.Render("dirty")+"  "+
-		dimLabels(fmt.Sprintf("avg %s · peak %s · ", zfs.NiceBytes(dsum.DirtyAvg), zfs.NiceBytes(dsum.DirtyPeak)))+
+		dimLabels(fmt.Sprintf("avg %s · peak %s · ", zfs.NiceBytes(dirtyAvg), zfs.NiceBytes(peak)))+
 		throtSty(throt)+
-		styDim.Render(fmt.Sprintf(" (%s since boot) · last %d txgs",
-			zfs.NiceCount(m.perf.dmu["dmu_tx_dirty_delay"]), len(txgRows))))
+		styDim.Render(fmt.Sprintf(" (%s since boot) · last %s",
+			zfs.NiceCount(m.perf.dmu["dmu_tx_dirty_delay"]),
+			niceAge(time.Duration(len(win))*perfInterval))))
 	lineRow := -1
 	if dirtyMax > 0 && delayBytes > 0 && scale > 0 {
 		f := float64(delayBytes) / float64(scale)
@@ -297,8 +311,11 @@ func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate floa
 	}
 	total := chartH * 4
 	lvl := func(nd int64) int {
-		if nd <= 0 || scale <= 0 {
-			return 1
+		if nd < 0 {
+			return 0 // no txg committed in this window: blank column
+		}
+		if nd == 0 || scale <= 0 {
+			return 1 // measured zero: muted baseline dot
 		}
 		l := 2 + int(nd*int64(total-2)/scale)
 		if l > total {
@@ -347,11 +364,11 @@ func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate floa
 				put(' ', 0)
 			}
 		}
-		for i := 0; i < chartW-(len(txgRows)+1)/2; i++ {
+		for i := 0; i < chartW-(len(win)+1)/2; i++ {
 			rule()
 		}
-		// a cell's above-line rows wear warn when either of its txgs
-		// crossed the delay line; below-line mass stays gold
+		// a cell's above-line rows wear warn when either of its windows
+		// held a txg over the delay line; below-line mass stays gold
 		cell := func(lL, lR int, aNd, bNd int64) {
 			bits := brailleL[clamp4(lL-dotFloor)] | brailleR[clamp4(lR-dotFloor)]
 			if bits == 0 {
@@ -373,13 +390,12 @@ func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate floa
 			put(0x2800|bits, sty)
 		}
 		i := 0
-		if len(txgRows)%2 == 1 {
-			cell(0, lvl(txgRows[0].NDirty), 0, txgRows[0].NDirty)
+		if len(win)%2 == 1 {
+			cell(0, lvl(win[0]), -1, win[0])
 			i = 1
 		}
-		for ; i < len(txgRows); i += 2 {
-			cell(lvl(txgRows[i].NDirty), lvl(txgRows[i+1].NDirty),
-				txgRows[i].NDirty, txgRows[i+1].NDirty)
+		for ; i < len(win); i += 2 {
+			cell(lvl(win[i]), lvl(win[i+1]), win[i], win[i+1])
 		}
 		flush()
 		row := rep(" ", prefixW) + sb.String()
