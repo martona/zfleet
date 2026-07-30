@@ -228,12 +228,21 @@ func inspector(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	head = append(head, "")
 	lines := head
 
-	// the live engine: banner, io charts, dirty chart, arc, txg, zil
-	lines = append(lines, poolPerfLines(m, h, p, w)...)
-	lines = append(lines, "")
+	// the throttle banner outranks everything; the vdev table outranks the
+	// engine blocks — vertically constrained panels should show a failed
+	// drive before arc stats
+	banner, engine := poolPerfLines(m, h, p, w)
+	if len(banner) > 0 {
+		lines = append(lines, banner...)
+		lines = append(lines, "")
+	}
 
 	// the unified vdev table: verdicts, temps, windowed latency, odometers
 	lines = append(lines, poolTable(m, h, p, w)...)
+	lines = append(lines, "")
+
+	// the engine room: io charts, dirty chart, arc, txg, zil
+	lines = append(lines, engine...)
 	lines = append(lines, "")
 
 	// capacity basement: class bars, allocation overhead, cloning footprint

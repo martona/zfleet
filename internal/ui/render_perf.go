@@ -21,11 +21,14 @@ const (
 	vIdle
 )
 
-// poolPerfLines renders the pool panel's live-engine blocks: the verdict
-// banner, io charts, dirty chart, arc, txg and zil. Blocks that ride the
-// main ticks (io, arc) render always; the perf-fed ones wait for the 2s
-// collectors armed by the cursor sitting on this pool.
-func poolPerfLines(m *Model, h *hostState, p *zfs.Pool, w int) []string {
+// poolPerfLines renders the pool panel's live-engine content in two
+// slices: the verdict banner (which stays at the top of the panel, above
+// the vdev table — a throttle screams before anything else) and the
+// engine blocks (io charts, dirty chart, arc, txg, zil) that sit below
+// the table. Blocks riding the main ticks (io, arc) render always; the
+// perf-fed ones wait for the 2s collectors armed by the cursor sitting
+// on this pool.
+func poolPerfLines(m *Model, h *hostState, p *zfs.Pool, w int) (banner, engine []string) {
 	var lines []string
 	add := func(s string) { lines = append(lines, s) }
 	armed := m.perf.host == h && m.perf.pool == p.Name && m.perf.have
@@ -112,15 +115,14 @@ func poolPerfLines(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		}
 		switch tier {
 		case vScream:
-			add(" " + styWarnInv.Render(padR(" "+verdict+scrub+" ", w-2)))
+			banner = []string{" " + styWarnInv.Render(padR(" "+verdict+scrub+" ", w-2))}
 		case vAttn:
-			add(" " + styWarn.Render(verdict) + styDim.Render(scrub))
+			banner = []string{" " + styWarn.Render(verdict) + styDim.Render(scrub)}
 		case vIdle:
-			add(" " + styDim.Render(verdict+scrub))
+			banner = []string{" " + styDim.Render(verdict+scrub)}
 		default:
-			add(" " + dimLabels(verdict) + styDim.Render(scrub))
+			banner = []string{" " + dimLabels(verdict) + styDim.Render(scrub)}
 		}
-		add("")
 
 		ioChartLines(m, h, p, w, &lines)
 
@@ -160,7 +162,7 @@ func poolPerfLines(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		ioChartLines(m, h, p, w, &lines)
 		arcLines(h, rollHit, memThrottle, noGrow, &lines)
 	}
-	return lines
+	return banner, lines
 }
 
 // ioChartLines renders the r/w bandwidth history two rows tall, scaled to
@@ -242,7 +244,8 @@ func arcLines(h *hostState, rollHit string, memThrottle float64, noGrow bool, li
 // geometry claimed from the first frame, the delay line ruled across,
 // columns crossing it wearing warn above the line.
 func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate float64, lines *[]string) {
-	const chartH, prefixW, scaleLbl = 4, 9, 17
+	// prefix 8 aligns the chart's left edge with the "a" of "avg" above it
+	const chartH, prefixW, scaleLbl = 4, 8, 17
 	txgRows := m.perf.txgHist
 	chartW := w - prefixW - scaleLbl
 	if chartW < 20 {
@@ -578,8 +581,8 @@ func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		{"rq", "r-queue", 9, 6},
 		{"wq", "w-queue", 9, 4},
 		{"wpk", "w-peak", 9, 3},
-		{"read", "READ", 8, 8},
-		{"writ", "WRIT", 8, 9},
+		{"read", "READ", 8, 9},
+		{"writ", "WRIT", 8, 8}, // writes wear out drives; WRIT outranks READ
 	}
 	const nameMin = 24
 	budget := w - 2 - nameMin
