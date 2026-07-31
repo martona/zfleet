@@ -192,6 +192,17 @@ func (s Ssh) Destroy(ctx context.Context, target string, recursive, sudo bool) (
 	return s.runCombined(ctx, cmd)
 }
 
+func (s Ssh) PoolClear(ctx context.Context, pool, vdev string, sudo bool) (string, error) {
+	cmd := "zpool clear " + quote(pool)
+	if vdev != "" {
+		cmd += " " + quote(vdev)
+	}
+	if sudo {
+		cmd = "sudo -n " + cmd
+	}
+	return s.runCombined(ctx, cmd)
+}
+
 func (s Ssh) PerfTexts(ctx context.Context, pool string) (string, string, string, string, error) {
 	txgs, err := s.run(ctx, "cat "+quote("/proc/spl/kstat/zfs/"+pool+"/txgs"))
 	if err != nil && transportDown(err) {

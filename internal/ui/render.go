@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/martona/zfs-explorer/internal/zfs"
 )
@@ -25,6 +26,31 @@ func rep(s string, n int) string {
 		return ""
 	}
 	return strings.Repeat(s, n)
+}
+
+// spliceOverlay floats box lines over the frame starting at row top, pad
+// cells in from the left edge — PRESERVING the frame content on both
+// sides of the box. The old splice rebuilt the whole row as blanks around
+// the box, which amputated the hosts column whenever a popup floated over
+// the two-pane view. ANSI-aware: styles left of the box are closed with a
+// reset; TruncateLeft re-emits the sequences it skips, so the right
+// remainder keeps its own styling.
+func spliceOverlay(frameLines, box []string, top, pad int) {
+	for i, bl := range box {
+		li := top + i
+		if li < 1 || li > len(frameLines)-4 {
+			continue
+		}
+		orig := frameLines[li]
+		left := ansi.Truncate(orig, pad, "")
+		if strings.ContainsRune(left, '\x1b') {
+			// close any style the cut left open — but only when styles
+			// exist at all, or non-TTY dumps grow literal reset codes
+			left += "\x1b[0m"
+		}
+		right := ansi.TruncateLeft(orig, pad+lipgloss.Width(bl), "")
+		frameLines[li] = left + bl + right
+	}
 }
 
 // fit pads or truncates a possibly-styled line to exactly w cells.

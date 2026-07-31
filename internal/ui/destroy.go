@@ -682,12 +682,6 @@ func destroyOverlay(m *Model, frame string) string {
 		top = (len(frameLines) - len(box)) / 3
 	}
 	pad := (inner - boxW) / 2
-	for i, bl := range box {
-		li := top + i
-		if li < 1 || li > len(frameLines)-4 {
-			continue
-		}
-		frameLines[li] = "│" + rep(" ", pad) + bl + rep(" ", inner-pad-boxW) + "│"
-	}
+	spliceOverlay(frameLines, box, top, 1+pad)
 	return strings.Join(frameLines, "\n")
 }

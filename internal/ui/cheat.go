@@ -28,7 +28,13 @@ func (m *Model) cheatBase() []keyHint {
 			{"↑↓", "move"}, {"esc", "close"}}
 	}
 	if m.ackPop {
-		return []keyHint{{"enter", "ack"}, {"↑↓", "move"}, {"esc", "close"}}
+		// the verb follows the line: acks are local ledger entries, clears
+		// run the remote command shown on the line
+		lbl := "ack"
+		if m.ackCur < len(m.ackList) && m.ackList[m.ackCur].pool != "" {
+			lbl = "clear"
+		}
+		return []keyHint{{"enter", lbl}, {"↑↓", "move"}, {"esc", "close"}}
 	}
 	if m.filterIn {
 		return []keyHint{{"", "type to filter…"}, {"↓", "results"},

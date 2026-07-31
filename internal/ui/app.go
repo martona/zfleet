@@ -651,6 +651,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dirtyData()
 		return m, cmd
 
+	case poolClearMsg:
+		return m, m.applyPoolClear(msg)
+
 	case dryRunMsg:
 		if h := m.hostByName(msg.host); h != nil {
 			if r := h.dryCache[msg.target]; r != nil {
@@ -723,8 +726,7 @@ func (m *Model) keyDispatch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s := msg.String(); s == "q" || s == "ctrl+c" {
 			return m, tea.Quit
 		}
-		m.ackKeys(msg.String())
-		return m, nil
+		return m, m.ackKeys(msg.String())
 	}
 	return m.treeKeys(msg)
 }

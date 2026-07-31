@@ -53,11 +53,16 @@ type Source interface {
 	// ("ds@a,b,c") and returns its output. The -n flag is hardcoded; this
 	// never destroys anything.
 	DestroyDryRun(ctx context.Context, target string) (string, error)
-	// Destroy runs `zfs destroy` FOR REAL — the only destructive command
+	// Destroy runs `zfs destroy` FOR REAL — the most destructive command
 	// in the tool. recursive adds -r (whole-dataset marks mean the
 	// subtree); sudo prefixes `sudo -n` for hosts where the probe granted
 	// it. The UI shows the operator this exact command before it runs.
 	Destroy(ctx context.Context, target string, recursive, sudo bool) (string, error)
+	// PoolClear runs `zpool clear pool [vdev]` — the second write command,
+	// reachable only through the warnings popup, which shows the operator
+	// the verbatim line. Resets error counters; the ereports stay in the
+	// journal and the clear itself lands in zpool history.
+	PoolClear(ctx context.Context, pool, vdev string, sudo bool) (string, error)
 	// PerfTexts returns the kstat surfaces for one pool's perf blocks:
 	// txgs ring, dmu_tx counters, zil counters, module params. All
 	// instant file reads; vdev latency comes from IostatStream.
@@ -255,6 +260,18 @@ func (Exec) Destroy(ctx context.Context, target string, recursive, sudo bool) (s
 	return string(out), err
 }
 
+func (Exec) PoolClear(ctx context.Context, pool, vdev string, sudo bool) (string, error) {
+	args := []string{"zpool", "clear", pool}
+	if vdev != "" {
+		args = append(args, vdev)
+	}
+	if sudo {
+		args = append([]string{"sudo", "-n"}, args...)
+	}
+	out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+	return string(out), err
+}
+
 func (Exec) PerfTexts(ctx context.Context, pool string) (string, string, string, string, error) {
 	readFile := func(p string) string {
 		b, _ := os.ReadFile(p)
@@ -415,6 +432,12 @@ func (Replay) DestroyDryRun(context.Context, string) (string, error) {
 // surface; fixtures re-read on the next tick, so the "destroyed" data
 // calmly returns.
 func (Replay) Destroy(context.Context, string, bool, bool) (string, error) {
+	return "", nil
+}
+
+// PoolClear simulates success; the fixture's counters calmly return on
+// the next tick, which is exactly what a sick puppet is for.
+func (Replay) PoolClear(context.Context, string, string, bool) (string, error) {
 	return "", nil
 }
 

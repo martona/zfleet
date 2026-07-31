@@ -1,30 +1,41 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/martona/zfs-explorer/internal/zfs"
 )
 
-// Acknowledgements. ~/.config/zfse/ack.conf silences one SMART check on
-// one drive at one value: append-only, hand-editable, yadm-travels with
+// The warnings inbox. Two species of yelling, two remedies:
+//
+// SMART warns — zfse's own interpretations — are ACKED into
+// ~/.config/zfse/ack.conf: append-only, hand-editable, yadm-travels with
 // the operator. The key is MODEL_SERIAL — no hostname, no transport
 // prefix — so a drive can move between hosts and HBAs without lighting up
 // again. A warn sleeps while its value matches the acked one and RETURNS
-// the moment it grows. Scope is SMART checks only: zpool states and
-// counters are zfs's own testimony, and their remedy (zpool clear) is a
-// write op that belongs to the write-mode era.
+// the moment it grows.
 //
 //	SuperMicro_SSD_SMC0515D90822DJ06199 ata187 52  # 2026-07-25 commodoreplus4
 //
 // Later lines win, so re-acking a grown counter is one more line — and
 // the file quietly becomes the drive's decay log.
+//
+// zpool error counters — zfs's OWN testimony — are never masked
+// client-side (zfse must not show green where zpool status shows an
+// error). Their remedy is zfs's remedy: the inbox line IS the verbatim
+// `zpool clear` command (round 33, the write-mode era arriving here as
+// prophesied), sudo-gated, enter runs it, the pool refetches immediately.
+// The ereports stay in the journal; the clear lands in zpool history —
+// clearing the dashboard light never erases the logbook.
 
 // ackKey is the travel-proof drive identity: MODEL_SERIAL, spaces
 // underscored. Empty when the drive offers neither — such a drive cannot
@@ -177,11 +188,12 @@ func (h *hostState) ackPendingHost() int {
 	return n
 }
 
-// ackPending counts them fleet-wide — the popup's inventory.
+// ackPending counts the inbox fleet-wide — unanswered SMART warns plus
+// counter-bearing vdevs awaiting a clear.
 func (m *Model) ackPending() int {
 	n := 0
 	for _, h := range m.hosts {
-		n += h.ackPendingHost()
+		n += h.ackPendingHost() + len(h.clearFacts())
 	}
 	return n
 }
@@ -198,6 +210,169 @@ type ackEntry struct {
 	check string // check ID; label and value resolve live at render
 	dup   int    // occurrences collapsed into this line (nvme namespaces
 	// echo their controller's one health log — one fact, one line, one ack)
+
+	// clear lines: zpool counter facts. pool != "" marks the kind; vdev ""
+	// means pool-wide (interior vdev counters — zpool clear addresses
+	// devices, so interior rows clear at the pool).
+	pool    string
+	vdev    string
+	clearSt int
+	errText string
+}
+
+const (
+	clearIdle = iota
+	clearRunning
+	clearDone // counters gone from zfs; the line retires when the refetch lands
+	clearFailed
+)
+
+// clearFacts lists a host's counter-bearing vdevs as inbox entries: one
+// per leaf with its own counters, plus one pool-wide entry when an
+// interior vdev carries any.
+func (h *hostState) clearFacts() []ackEntry {
+	var out []ackEntry
+	for _, p := range h.pools {
+		poolWide := false
+		var walk func(v *zfs.Vdev)
+		walk = func(v *zfs.Vdev) {
+			if len(v.Children) == 0 {
+				if v.HasErrors() {
+					out = append(out, ackEntry{h: h, pool: p.Name, vdev: v.Name})
+				}
+				return
+			}
+			if v.HasErrors() {
+				poolWide = true
+			}
+			for _, c := range v.Children {
+				walk(c)
+			}
+		}
+		for _, c := range p.Classes {
+			for _, v := range c.Vdevs {
+				walk(v)
+			}
+		}
+		if poolWide {
+			out = append(out, ackEntry{h: h, pool: p.Name})
+		}
+	}
+	return out
+}
+
+// vdevBadge renders a vdev's nonzero counters the way the tree does:
+// "R 3 C 1", counters as zpool printed them.
+func vdevBadge(v *zfs.Vdev) string {
+	nz := func(s string) bool { return s != "" && s != "0" }
+	var parts []string
+	if nz(v.ReadErr) {
+		parts = append(parts, "R "+v.ReadErr)
+	}
+	if nz(v.WriteErr) {
+		parts = append(parts, "W "+v.WriteErr)
+	}
+	if nz(v.CksumErr) {
+		parts = append(parts, "C "+v.CksumErr)
+	}
+	return strings.Join(parts, " ")
+}
+
+// clearResolve returns the live counter badge for a clear line — "" once
+// the counters are gone (cleared, or the vdev left the pool).
+func (e ackEntry) clearResolve() string {
+	p := e.h.pool(e.pool)
+	if p == nil {
+		return ""
+	}
+	badge := ""
+	var walk func(v *zfs.Vdev)
+	walk = func(v *zfs.Vdev) {
+		if badge != "" {
+			return
+		}
+		leaf := len(v.Children) == 0
+		if e.vdev == "" && !leaf && v.HasErrors() {
+			badge = vdevBadge(v)
+			return
+		}
+		if e.vdev != "" && leaf && v.Name == e.vdev {
+			badge = vdevBadge(v)
+			return
+		}
+		for _, c := range v.Children {
+			walk(c)
+		}
+	}
+	for _, c := range p.Classes {
+		for _, v := range c.Vdevs {
+			walk(v)
+		}
+	}
+	return badge
+}
+
+// clearCmd is the verbatim command a clear line will run — showing it IS
+// the design: the operator sees this is a remote write, not a local
+// ledger entry.
+func clearCmd(e ackEntry) string {
+	s := "zpool clear " + e.pool
+	if e.vdev != "" {
+		s += " " + e.vdev
+	}
+	if e.h.sudoOK {
+		s = "sudo -n " + s
+	}
+	return s
+}
+
+type poolClearMsg struct {
+	host, pool, vdev, text string
+	err                    error
+}
+
+func execPoolClear(h *hostState, pool, vdev string) tea.Cmd {
+	host, src, sudo := h.name, h.src, h.sudoOK
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		text, err := src.PoolClear(ctx, pool, vdev, sudo)
+		return poolClearMsg{host: host, pool: pool, vdev: vdev, text: text, err: err}
+	}
+}
+
+// applyPoolClear lands one clear's result: failure wears its reason on
+// the line; success refetches the pool NOW so the counters vanish from
+// every surface at once.
+func (m *Model) applyPoolClear(msg poolClearMsg) tea.Cmd {
+	h := m.hostByName(msg.host)
+	if h == nil {
+		return nil
+	}
+	for i := range m.ackList {
+		e := &m.ackList[i]
+		if e.h == h && e.pool == msg.pool && e.vdev == msg.vdev && e.clearSt == clearRunning {
+			if msg.err != nil {
+				e.clearSt = clearFailed
+				e.errText = firstLineOf(msg.text)
+				if e.errText == "" {
+					e.errText = msg.err.Error()
+				}
+			} else {
+				e.clearSt = clearDone
+			}
+			break
+		}
+	}
+	if msg.err != nil {
+		return nil
+	}
+	h.poolsDue = time.Time{}
+	if !h.poolsPend {
+		h.poolsPend = true
+		return fetchPools(h)
+	}
+	return nil
 }
 
 // OpenAckPopup snapshots the unanswered warns and opens the popup (also
@@ -232,6 +407,10 @@ func (m *Model) OpenAckPopup() {
 			}
 		}
 	}
+	// the second species: zpool counters, each line the clear that answers it
+	for _, h := range m.hosts {
+		m.ackList = append(m.ackList, h.clearFacts()...)
+	}
 	m.ackCur = 0
 	m.ackPop = len(m.ackList) > 0
 }
@@ -252,10 +431,18 @@ func (e ackEntry) resolve() (*zfs.Disk, zfs.SmartCheck, bool) {
 	return nil, zfs.SmartCheck{}, false
 }
 
-// ackRepair drops entries that no longer resolve to a live unacked warn.
+// ackRepair drops entries that no longer resolve to a live unacked warn —
+// or, for clear lines, to live counters (in-flight and failed clears stay
+// visible regardless; the operator deserves the outcome).
 func (m *Model) ackRepair() {
 	var keep []ackEntry
 	for _, e := range m.ackList {
+		if e.pool != "" {
+			if e.clearSt == clearRunning || e.clearSt == clearFailed || e.clearResolve() != "" {
+				keep = append(keep, e)
+			}
+			continue
+		}
 		if d, c, ok := e.resolve(); ok && e.h.checkSev(d, c) > sevOK {
 			keep = append(keep, e)
 		}
@@ -272,10 +459,10 @@ func (m *Model) ackRepair() {
 	}
 }
 
-func (m *Model) ackKeys(msg string) {
+func (m *Model) ackKeys(msg string) tea.Cmd {
 	m.ackRepair()
 	if !m.ackPop {
-		return
+		return nil
 	}
 	switch msg {
 	case "down", "j":
@@ -287,7 +474,15 @@ func (m *Model) ackKeys(msg string) {
 			m.ackCur--
 		}
 	case "enter":
-		e := m.ackList[m.ackCur]
+		e := &m.ackList[m.ackCur]
+		if e.pool != "" {
+			// the write species: runs the exact command on the line
+			if e.clearSt != clearIdle || !e.h.sudoOK {
+				return nil
+			}
+			e.clearSt = clearRunning
+			return execPoolClear(e.h, e.pool, e.vdev)
+		}
 		if d, c, ok := e.resolve(); ok {
 			m.appendAck(ackKey(d), c, e.h.name)
 		}
@@ -295,6 +490,7 @@ func (m *Model) ackKeys(msg string) {
 	case "esc", "a":
 		m.ackPop = false
 	}
+	return nil
 }
 
 // ackOverlay floats the popup over the frame: the box replaces a band of
@@ -306,10 +502,34 @@ func ackOverlay(m *Model, frame string) string {
 	}
 	type row struct {
 		host, node, model, warn string
+		warnSty                 lipgloss.Style
+		cmd                     bool // clear line: node IS the verbatim command
 	}
 	var rows []row
 	hw, nw := 4, 4
 	for _, e := range m.ackList {
+		if e.pool != "" {
+			r := row{host: e.h.name, node: clearCmd(e), cmd: true, warnSty: styWarn}
+			switch e.clearSt {
+			case clearRunning:
+				r.warn = "clearing…"
+			case clearDone:
+				r.warn, r.warnSty = "cleared", styGood
+			case clearFailed:
+				r.warn, r.warnSty = "FAILED: "+truncate(e.errText, 40), styBad
+			default:
+				r.warn = e.clearResolve()
+				if !e.h.sudoOK {
+					r.warn += " · no sudo"
+					r.warnSty = styDim
+				}
+			}
+			rows = append(rows, r)
+			if n := len(e.h.name); n > hw {
+				hw = n
+			}
+			continue
+		}
 		d, c, _ := e.resolve()
 		node := e.node
 		if e.dup > 1 {
@@ -320,7 +540,8 @@ func ackOverlay(m *Model, frame string) string {
 				node = fmt.Sprintf("%s ×%d", node, e.dup)
 			}
 		}
-		rows = append(rows, row{e.h.name, node, d.Model, c.Label + " " + c.Value})
+		rows = append(rows, row{host: e.h.name, node: node, model: d.Model,
+			warn: c.Label + " " + c.Value, warnSty: styWarn})
 		if n := len(e.h.name); n > hw {
 			hw = n
 		}
@@ -328,19 +549,28 @@ func ackOverlay(m *Model, frame string) string {
 			nw = n
 		}
 	}
-	title := fmt.Sprintf(" acknowledge warnings (%d) ", len(rows))
+	title := fmt.Sprintf(" warnings (%d) ", len(rows))
 	var body []string
 	for i, r := range rows {
 		lead := "  "
 		if i == m.ackCur {
 			lead = "▸ "
 		}
-		line := lead + padR(r.host, hw+2) + padR(r.node, nw+2) +
-			padR(truncate(r.model, 18), 19)
+		var line string
+		if r.cmd {
+			// the command is the content — dim host, VERBATIM line, state
+			line = lead + padR(r.host, hw+2) + r.node + "  "
+		} else {
+			line = lead + padR(r.host, hw+2) + padR(r.node, nw+2) +
+				padR(truncate(r.model, 18), 19)
+		}
 		if i == m.ackCur {
 			body = append(body, styInv.Render(line+r.warn))
+		} else if r.cmd {
+			body = append(body, styDim.Render(lead+padR(r.host, hw+2))+r.node+"  "+
+				r.warnSty.Render(r.warn))
 		} else {
-			body = append(body, styDim.Render(line)+styWarn.Render(r.warn))
+			body = append(body, styDim.Render(line)+r.warnSty.Render(r.warn))
 		}
 	}
 	if m.ackErr != "" {
@@ -369,12 +599,6 @@ func ackOverlay(m *Model, frame string) string {
 		top = (len(lines) - len(box)) / 3
 	}
 	pad := (inner - boxW) / 2
-	for i, bl := range box {
-		li := top + i
-		if li < 1 || li > len(lines)-4 {
-			continue
-		}
-		lines[li] = "│" + rep(" ", pad) + bl + rep(" ", inner-pad-boxW) + "│"
-	}
+	spliceOverlay(lines, box, top, 1+pad)
 	return strings.Join(lines, "\n")
 }
