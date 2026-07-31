@@ -9,7 +9,7 @@ import (
 // ("0", "12", "1.05K"), and — importantly — does NOT sum children into
 // parents: a disk whose read errors parity absorbed shows R 12 while its
 // raidz row stays at zero, because the vdev level never failed a request.
-// The subtree sums here are zfse's own aggregation, so a pool row can warn
+// The subtree sums here are zfleet's own aggregation, so a pool row can warn
 // about a sick disk the pool-level counters never mention.
 
 // ErrCount parses one printed counter into a number; "-" and blanks are

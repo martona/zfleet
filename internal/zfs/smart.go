@@ -6,7 +6,7 @@ import (
 )
 
 // SMART, distilled. smartctl -j does the vendor-attribute zoo-keeping;
-// what zfse needs from each drive is: is it dying (smart_status), is it
+// what zfleet needs from each drive is: is it dying (smart_status), is it
 // warning (the critical counters health.sh taught us to fear), how hot,
 // how old, and how much has passed through it.
 

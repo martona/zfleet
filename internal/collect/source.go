@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 type Source interface {

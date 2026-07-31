@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // The inheritance/split state machine, exercised without a terminal:

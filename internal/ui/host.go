@@ -4,11 +4,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/martona/zfs-explorer/internal/collect"
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/collect"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
-// hostState is everything zfse knows about one host: its collector, its
+// hostState is everything zfleet knows about one host: its collector, its
 // connection lifecycle, identity, vitals, and every per-host data cache
 // that lived directly on Model in the single-host era. The single-host
 // view is simply a fleet of one with the host chrome hidden.

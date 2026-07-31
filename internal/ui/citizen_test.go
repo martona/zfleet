@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // Snapshot citizenship: datasets with snapshots earn real chevrons, the

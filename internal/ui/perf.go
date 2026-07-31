@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // The pool view's live-performance substrate. Since the great unification

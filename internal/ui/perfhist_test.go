@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // bankDirty buckets committed txgs into wall-clock windows by birth time:

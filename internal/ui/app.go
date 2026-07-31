@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/martona/zfs-explorer/internal/collect"
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/collect"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 const (

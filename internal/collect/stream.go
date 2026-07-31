@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // streamCmd starts a long-lived command and hands back its stdout as a
 // ReadCloser. Close kills the process and reaps it; on Linux Pdeathsig
-// additionally guarantees the child dies with us, so a crashed zfse can
+// additionally guarantees the child dies with us, so a crashed zfleet can
 // never orphan a stream.
 type procReader struct {
 	io.ReadCloser

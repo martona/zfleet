@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // Ssh runs the same read-only commands as Exec on a remote host, through the
@@ -32,7 +32,7 @@ func sshArgs(dest string) []string {
 		// turns every follow-up command into a cheap channel open
 		args = append(args,
 			"-o", "ControlMaster=auto",
-			"-o", "ControlPath=~/.ssh/zfse-%C",
+			"-o", "ControlPath=~/.ssh/zfleet-%C",
 			"-o", "ControlPersist=60s")
 	}
 	return append(args, "--", dest)

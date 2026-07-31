@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // The frame is hand-composed rather than widget-assembled: one box, an
@@ -64,7 +64,7 @@ func fit(s string, w int) string {
 
 func frame(m *Model) string {
 	if m.w < 70 || m.h < 16 {
-		return fmt.Sprintf("zfse needs at least 70x16 (have %dx%d)", m.w, m.h)
+		return fmt.Sprintf("zfleet needs at least 70x16 (have %dx%d)", m.w, m.h)
 	}
 	if !m.multiHost {
 		// single host: nothing to show until its pools land. A fleet
@@ -72,10 +72,10 @@ func frame(m *Model) string {
 		h := m.hosts[0]
 		if len(h.pools) == 0 {
 			if h.lastErr != nil {
-				return "zfse: " + h.lastErr.Error()
+				return "zfleet: " + h.lastErr.Error()
 			}
 			if h.errText != "" {
-				return "zfse: " + h.errText
+				return "zfleet: " + h.errText
 			}
 			return "collecting…"
 		}

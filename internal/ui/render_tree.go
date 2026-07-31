@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 func expandMark(r treeRow) string {
@@ -154,7 +154,7 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 		name := truncate(r.pool.Name, nameW-lipgloss.Width(prefix))
 		pad := rep(" ", nameW-lipgloss.Width(prefix+name))
 		sick := zfs.StateRank(r.pool.State) != 0
-		// zfse's own bubbling: zfs never sums child counters upward and
+		// zfleet's own bubbling: zfs never sums child counters upward and
 		// knows nothing of SMART, so an ONLINE pool over a counter-riddled
 		// or health-warning disk warns here regardless. The row says only
 		// WARN — a summary verdict; the inspector holds the root cause.

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // zpool counters in the warnings inbox: one line per counter-bearing

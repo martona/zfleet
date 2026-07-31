@@ -13,9 +13,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/martona/zfs-explorer/internal/collect"
-	"github.com/martona/zfs-explorer/internal/ui"
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/collect"
+	"github.com/martona/zfleet/internal/ui"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // multiFlag collects a repeatable string flag.
@@ -27,7 +27,7 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 func main() {
 	var replays, hostFlags multiFlag
 	flag.Var(&replays, "replay", "fixture `dir` (or name=dir, repeatable) instead of live collection")
-	flag.Var(&hostFlags, "host", "ssh `destination` of a remote host (repeatable; adds to the hosts file)")
+	flag.Var(&hostFlags, "host", "ssh `destination` of a remote host (repeatable; adds to zfleet.conf's [hosts])")
 	noDedupe := flag.Bool("no-dedupe", false, "keep entries matching the local hostname as ssh hosts (testing)")
 	dump := flag.Bool("dump", false, "render one frame to stdout and exit (no TTY needed)")
 	width := flag.Int("width", 110, "frame width for --dump")
@@ -40,13 +40,14 @@ func main() {
 	flag.Var(&markFlags, "mark", "selection to mark for --dump: [host:]ds@s1,s2 or a whole [host:]ds (repeatable)")
 	filterFlag := flag.String("filter", "", "filter pattern for --dump: ds[@snap], substring or glob; sweeps the fleet like the live / key")
 	vdrives := flag.Bool("vdrives", false, "show every drive's check ledger in --dump (the live v toggle)")
-	ackFile := flag.String("ack-file", "", "acknowledgement ledger `path` (default ~/.config/zfse/ack.conf)")
+	ackFile := flag.String("ack-file", "", "acknowledgement ledger `path` (default ~/.config/zfleet/ack.conf)")
 	ackPopup := flag.Bool("ack-popup", false, "open the acknowledge popup in --dump")
 	destroyPopup := flag.Bool("destroy-popup", false, "open the F8 destroy popup over the --mark selection in --dump")
 	flag.Parse()
 
+	readConfig()
 	specs, multi := resolveHosts(replays, hostFlags, *noDedupe)
-	m := ui.New(specs, multi, readTuning())
+	m := ui.New(specs, multi, cfgTuning)
 	m.SetAckFile(*ackFile)
 
 	// hostFor resolves an optional "host:" prefix on dump arguments,
@@ -302,7 +303,7 @@ func resolveHosts(replays, hostFlags multiFlag, noDedupe bool) ([]ui.HostSpec, b
 		return []ui.HostSpec{{Name: "replay", Src: collect.Replay{Dir: bare[0]}}}, false
 	}
 
-	entries := append(readHostsFile(), hostFlags...)
+	entries := append(append([]string(nil), cfgHosts...), hostFlags...)
 	localOK := runtime.GOOS == "linux" && haveZpool()
 	localName := shortHostname()
 
@@ -349,73 +350,86 @@ func resolveHosts(replays, hostFlags multiFlag, noDedupe bool) ([]ui.HostSpec, b
 	return uniquifyNames(specs), true
 }
 
-// readTuning loads ~/.config/zfse/config: `key = duration` lines,
-// #-comments. Keys are the cadence knobs — bg-stats, bg-pools, bg-disks
-// (background collector intervals for hosts the cursor is not on),
-// promote (cursor dwell before a host goes foreground), demote (grace
-// before it drops back). Absent file = defaults; a bad key or duration
-// fails loudly rather than silently ignoring a typo.
-func readTuning() ui.Tuning {
-	t := ui.DefaultTuning()
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return t
-	}
-	b, err := os.ReadFile(filepath.Join(dir, "zfse", "config"))
-	if err != nil {
-		return t
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, val, ok := strings.Cut(line, "=")
-		if !ok {
-			fail("config: not a key = value line: " + line)
-		}
-		d, err := time.ParseDuration(strings.TrimSpace(val))
-		if err != nil {
-			fail("config: " + err.Error())
-		}
-		switch strings.TrimSpace(key) {
-		case "bg-stats":
-			t.BgStats = d
-		case "bg-pools":
-			t.BgPools = d
-		case "bg-disks":
-			t.BgDisks = d
-		case "promote":
-			t.Promote = d
-		case "demote":
-			t.Demote = d
-		default:
-			fail("config: unknown key: " + strings.TrimSpace(key))
-		}
-	}
-	return t
-}
+// The one config file: ~/.config/zfleet/zfleet.conf, INI-style sections
+// (the zfsrecvd/stevedore idiom — brackets, plain lines, # comments).
+// Loaded once by readConfig into these; ack.conf stays its own file (an
+// append-only ledger, not configuration).
+var (
+	cfgHosts  []string
+	cfgTuning = ui.DefaultTuning()
+)
 
-// readHostsFile loads ~/.config/zfse/hosts: one ssh destination per line,
-// #-comments, blank lines ignored. Absent file = no entries.
-func readHostsFile() []string {
+// readConfig loads ~/.config/zfleet/zfleet.conf:
+//
+//	[hosts]      one ssh destination per line
+//	[collector]  cadence knobs, `key = duration` — bg-stats, bg-pools,
+//	             bg-disks (background collector intervals for hosts the
+//	             cursor is not on), promote (dwell before foreground),
+//	             demote (grace before background)
+//
+// Absent file = defaults (a fresh box needs no config). A bad section,
+// key, or duration fails loudly — a typo must not be silently ignored.
+// A leftover ~/.config/zfse with no zfleet.conf successor fails loudly
+// too: silently running without the fleet is worse than a startup error.
+func readConfig() {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		return nil
+		return
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "zfse", "hosts"))
+	b, err := os.ReadFile(filepath.Join(dir, "zfleet", "zfleet.conf"))
 	if err != nil {
-		return nil
+		if _, legacy := os.Stat(filepath.Join(dir, "zfse")); legacy == nil {
+			fail("found legacy ~/.config/zfse but no ~/.config/zfleet/zfleet.conf — migrate:\n" +
+				"  mkdir -p ~/.config/zfleet\n" +
+				"  mv ~/.config/zfse/ack.conf ~/.config/zfleet/  (if present)\n" +
+				"  merge the old 'hosts' and 'config' files into ~/.config/zfleet/zfleet.conf\n" +
+				"  as [hosts] and [collector] sections, then remove ~/.config/zfse")
+		}
+		return
 	}
-	var out []string
+	section := ""
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		out = append(out, line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(line[1 : len(line)-1])
+			if section != "hosts" && section != "collector" {
+				fail("zfleet.conf: unknown section [" + section + "]")
+			}
+			continue
+		}
+		switch section {
+		case "hosts":
+			cfgHosts = append(cfgHosts, line)
+		case "collector":
+			key, val, ok := strings.Cut(line, "=")
+			if !ok {
+				fail("zfleet.conf: not a `key = duration` line: " + line)
+			}
+			d, err := time.ParseDuration(strings.TrimSpace(val))
+			if err != nil {
+				fail("zfleet.conf: " + err.Error())
+			}
+			switch strings.TrimSpace(key) {
+			case "bg-stats":
+				cfgTuning.BgStats = d
+			case "bg-pools":
+				cfgTuning.BgPools = d
+			case "bg-disks":
+				cfgTuning.BgDisks = d
+			case "promote":
+				cfgTuning.Promote = d
+			case "demote":
+				cfgTuning.Demote = d
+			default:
+				fail("zfleet.conf: unknown key: " + strings.TrimSpace(key))
+			}
+		default:
+			fail("zfleet.conf: line outside a [section]: " + line)
+		}
 	}
-	return out
 }
 
 // firstLabel reduces an ssh destination to its display name: strip user@,
@@ -479,6 +493,6 @@ func iostatBlocks(src collect.Source, n int, wait time.Duration) []string {
 }
 
 func fail(msg string) {
-	fmt.Fprintln(os.Stderr, "zfse: "+msg)
+	fmt.Fprintln(os.Stderr, "zfleet: "+msg)
 	os.Exit(1)
 }

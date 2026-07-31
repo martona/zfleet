@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/martona/zfs-explorer/internal/collect"
+	"github.com/martona/zfleet/internal/collect"
 )
 
 // The iostat stream: one long-lived `zpool iostat -Hpvly -T u 2` per host,

@@ -12,13 +12,13 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // The warnings inbox. Two species of yelling, two remedies:
 //
-// SMART warns — zfse's own interpretations — are ACKED into
-// ~/.config/zfse/ack.conf: append-only, hand-editable, yadm-travels with
+// SMART warns — zfleet's own interpretations — are ACKED into
+// ~/.config/zfleet/ack.conf: append-only, hand-editable, yadm-travels with
 // the operator. The key is MODEL_SERIAL — no hostname, no transport
 // prefix — so a drive can move between hosts and HBAs without lighting up
 // again. A warn sleeps while its value matches the acked one and RETURNS
@@ -30,7 +30,7 @@ import (
 // the file quietly becomes the drive's decay log.
 //
 // zpool error counters — zfs's OWN testimony — are never masked
-// client-side (zfse must not show green where zpool status shows an
+// client-side (zfleet must not show green where zpool status shows an
 // error). Their remedy is zfs's remedy: the inbox line IS the verbatim
 // `zpool clear` command (round 33, the write-mode era arriving here as
 // prophesied), sudo-gated, enter runs it, the pool refetches immediately.
@@ -60,7 +60,7 @@ func defaultAckPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(dir, "zfse", "ack.conf")
+	return filepath.Join(dir, "zfleet", "ack.conf")
 }
 
 // SetAckFile points the ack ledger at a path ("" = the default) and loads

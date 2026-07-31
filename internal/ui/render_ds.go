@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/martona/zfs-explorer/internal/zfs"
+	"github.com/martona/zfleet/internal/zfs"
 )
 
 // Right-panel inspectors for datasets, snapshots, snapshot families, and

@@ -1,4 +1,4 @@
-module github.com/martona/zfs-explorer
+module github.com/martona/zfleet
 
 go 1.26.4
 
