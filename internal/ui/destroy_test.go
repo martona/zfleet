@@ -18,7 +18,7 @@ import (
 
 func destroyFixture() (*Model, *hostState) {
 	m, h := marksFixture()
-	m.snapsShown = map[string]bool{}
+	m.snapsFolded = map[string]bool{}
 	m.expanded = map[string]bool{}
 	h.sudoOK, h.sudoProbed = true, true
 	return m, h
@@ -112,16 +112,18 @@ func TestDestroyDoneSuccess(t *testing.T) {
 		t.Fatal("dry cache survived — neighbors' reclaim math is stale now")
 	}
 
-	// dataset destroy sweeps the subtree's snapshot caches and t-toggles
-	m.snapsShown[treeDsID(h, "p/a/b")] = true
+	// dataset destroy sweeps the subtree's snapshot caches, expansion
+	// state, and t-folds
+	m.expanded[treeDsID(h, "p/a/b")] = true
+	m.snapsFolded[treeDsID(h, "p/a/b")] = true
 	m.destroyRows[1].status = destroyRunning
 	m.applyDestroyDone(destroyDoneMsg{host: "h", target: "p/a/b"})
 	wantMarks(t, m, h)
 	if _, ok := h.dsSnaps["p/a/b"]; ok {
 		t.Fatal("destroyed dataset's snapshot cache survived")
 	}
-	if m.snapsShown[treeDsID(h, "p/a/b")] {
-		t.Fatal("destroyed dataset's t-toggle survived")
+	if m.expanded[treeDsID(h, "p/a/b")] || m.snapsFolded[treeDsID(h, "p/a/b")] {
+		t.Fatal("destroyed dataset's view state survived")
 	}
 }
 
@@ -167,11 +169,11 @@ func TestDestroySigma(t *testing.T) {
 	if got := m.destroySigma(); got != want {
 		t.Fatalf("in progress = %q, want %q", got, want)
 	}
-	// a failure pins the ledger in progress form forever
+	// a failure pins the ledger in progress form forever, and names itself
 	m.destroyRows[1].status = destroyFailed
-	if got := m.destroySigma(); got != fmt.Sprintf("reclaimed 3/4 (%s/%s)",
-		zfs.NiceBytes(3<<20), zfs.NiceBytes(5<<20)) {
-		t.Fatalf("with failure = %q, want the in-progress form", got)
+	if got := m.destroySigma(); !strings.HasPrefix(got, fmt.Sprintf("reclaimed 3/4 (%s/%s)",
+		zfs.NiceBytes(3<<20), zfs.NiceBytes(5<<20))) || !strings.Contains(got, "1 failed") {
+		t.Fatalf("with failure = %q, want the in-progress form naming 1 failed", got)
 	}
 	// 100% success: the plain figure
 	m.destroyRows[1].status = destroyDone
@@ -285,7 +287,6 @@ func TestDestroyCursorRest(t *testing.T) {
 	m.expanded[treePoolID(h, "p")] = true
 	m.expanded[treeDsID(h, "p")] = true
 	m.expanded[treeDsID(h, "p/a")] = true
-	m.snapsShown[treeDsID(h, "p/a")] = true
 	m.marks[treeDsID(h, "p/a@s1")] = true
 	m.markGen++
 	m.OpenDestroyPopup()

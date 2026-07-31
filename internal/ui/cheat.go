@@ -74,9 +74,11 @@ func (m *Model) cheatBase() []keyHint {
 		default:
 			head = append(head, keyHint{"←", "parent"})
 		}
-		if s, ok := row.host.dsSnaps[row.ds.Name]; !ok || len(s) > 0 {
+		// the hint respects the swept universe: a dataset KNOWN to have no
+		// snapshots must not advertise a key that would open an empty ▾
+		if has, known := row.host.snapState(row.ds.Name); has || !known {
 			label := "snaps"
-			if m.snapsShown[row.id] {
+			if row.expanded && !m.snapsFolded[row.id] {
 				label = "hide snaps"
 			}
 			head = append(head, keyHint{"t", label})

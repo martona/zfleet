@@ -27,6 +27,12 @@ var (
 	styBar     = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	styBarWarn = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	styBarBad  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	// the snapshot sigil: bright violet, unclaimed by the rest of the
+	// palette (steel=reads, gold=writes, 11=WARN) and distinct under
+	// protan vision; bold carries the mark even where color can't. A
+	// direct 256-color index (#d787ff), NOT ANSI 13 — user palettes render
+	// 13 anywhere from neon to mud, and this mark must not be mud
+	stySnapAt = lipgloss.NewStyle().Foreground(lipgloss.Color("177")).Bold(true)
 )
 
 // sparkFam is riser ink by intensity — trickle, mid, burst — so big moves

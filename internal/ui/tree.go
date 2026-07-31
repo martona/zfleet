@@ -12,13 +12,18 @@ import (
 
 // The tree screen: one expandable tree — overview row, hosts (when any
 // remote is registered), pools, as much of the dataset hierarchy as the
-// user has unfolded, and, per dataset on demand (`t`), its snapshots. Two
-// presentations of the same rows: cursor on "≡ overview" drops the
-// inspector and renders full-width with io columns; cursor anywhere else is
-// the classic two-pane browse. →/Enter expands in place, ← collapses (or
-// jumps to parent). Host rows are organizational anchors: always open,
-// never collapsible — folding one would hide the very info you came
-// looking for.
+// user has unfolded, and snapshots as FULL CITIZENS: a dataset with
+// snapshots earns a real chevron and → unfolds them like children —
+// children first, snapshots after (they are more numerous and less
+// interesting — Marton's ordering). `t` is the opt-out: it folds an open
+// dataset's snapshots away (children stay) and brings them back. Chevron
+// knowledge comes from the pool-recursive snapshot sweep (the / filter's
+// machinery) fired when a pool expands; until it lands, childless
+// datasets wear a dim · placeholder. Two presentations of the same rows:
+// cursor on "≡ overview" drops the inspector and renders full-width with
+// io columns; cursor anywhere else is the classic two-pane browse.
+// →/Enter expands in place, ← collapses (or jumps to parent). Host rows
+// are organizational anchors: always open, never collapsible.
 
 const overviewID = "≡"
 
@@ -47,6 +52,12 @@ type treeRow struct {
 	parentID   string
 	expandable bool
 	expanded   bool
+	// snapshot census still in flight: the chevron slot shows a dim ·
+	// until the pool sweep says whether this childless dataset earns one
+	chevUnknown bool
+	// expansion holds ONLY snapshots — the chevron wears the snapshot
+	// violet so nobody gets jebaited into finding no datasets inside
+	snapOnly bool
 }
 
 // row ids are host-qualified so identical pool names on different hosts
@@ -126,23 +137,17 @@ func (m *Model) buildRows() []treeRow {
 				id := treeDsID(h, d.Name)
 				exp := m.expanded[id]
 				sel := cov || m.marks[id]
+				hasSnaps, known := h.snapState(d.Name)
+				unknown := !known
 				rows = append(rows, treeRow{
 					kind: rDataset, host: h, ds: d, depth: depth, id: id, parentID: parent,
-					expandable: len(d.Children) > 0 || m.snapsShown[id], expanded: exp, sel: sel,
+					expandable:  len(d.Children) > 0 || hasSnaps || unknown,
+					chevUnknown: len(d.Children) == 0 && unknown,
+					snapOnly:    len(d.Children) == 0 && hasSnaps,
+					expanded:    exp, sel: sel,
 				})
 				if !exp {
 					return
-				}
-				// snapshots first — they belong to the dataset you just
-				// toggled them on, so they appear right under it, above any
-				// descent into children
-				if m.snapsShown[id] {
-					if _, ok := h.dsSnaps[d.Name]; ok {
-						rows = append(rows, m.snapRows(h, d, depth+1, id, sel)...)
-					} else {
-						rows = append(rows, treeRow{kind: rPending, host: h, ds: d,
-							depth: depth + 1, id: "w:" + id, parentID: id})
-					}
 				}
 				kids := append([]*zfs.Dataset(nil), d.Children...)
 				if m.treeSortUsed {
@@ -152,6 +157,18 @@ func (m *Model) buildRows() []treeRow {
 				}
 				for _, k := range kids {
 					walk(k, depth+1, id, sel)
+				}
+				// snapshots AFTER the children — more numerous, less
+				// interesting — unless t folded them out of this view
+				if m.snapsFolded[id] {
+					return
+				}
+				switch {
+				case hasSnaps:
+					rows = append(rows, m.snapRows(h, d, depth+1, id, sel)...)
+				case unknown:
+					rows = append(rows, treeRow{kind: rPending, host: h, ds: d,
+						depth: depth + 1, id: "w:" + id, parentID: id})
 				}
 			}
 			walk(root, 1, pid, false)
@@ -377,9 +394,11 @@ func (m *Model) treeEnsure() tea.Cmd {
 	return nil
 }
 
-// toggleSnapsShown handles `t`: snapshots in or out of the tree, for the
-// dataset under the cursor or the one owning the snapshot under it.
-func (m *Model) toggleSnapsShown() (tea.Cmd, bool) {
+// toggleSnapsFold handles `t` — the citizenship opt-out: fold an open
+// dataset's snapshots away (children stay), or bring them back. On a
+// collapsed dataset it means "show me the snaps": expand with them
+// visible. → always clears the fold — t is a view op, not a mode.
+func (m *Model) toggleSnapsFold() (tea.Cmd, bool) {
 	row := m.treeSelected()
 	id := row.id
 	switch row.kind {
@@ -390,10 +409,12 @@ func (m *Model) toggleSnapsShown() (tea.Cmd, bool) {
 		return nil, false
 	}
 	h, ds := row.host, row.ds
-	if m.snapsShown[id] {
-		delete(m.snapsShown, id)
+	if m.expanded[id] && !m.snapsFolded[id] {
+		m.snapsFolded[id] = true
 		if len(ds.Children) == 0 {
+			// nothing left under an open childless dataset: collapse whole
 			delete(m.expanded, id)
+			delete(m.snapsFolded, id)
 		}
 		if row.kind != rDataset {
 			m.treeSel = id // the row under the cursor just vanished
@@ -402,10 +423,10 @@ func (m *Model) toggleSnapsShown() (tea.Cmd, bool) {
 		// state; the collection panel keeps accounting for them
 		return nil, true
 	}
-	if s, ok := h.dsSnaps[ds.Name]; ok && len(s) == 0 {
-		return nil, true // nothing to show; the inspector already says so
+	if has, known := h.snapState(ds.Name); known && !has {
+		return nil, true // known-none: opening an empty ▾ would be a jebait
 	}
-	m.snapsShown[id] = true
+	delete(m.snapsFolded, id)
 	m.expanded[id] = true
 	return m.ensureSnapsCmd(h, ds.Name), true
 }
@@ -491,8 +512,16 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		row := m.treeSelected()
 		if row.expandable && !row.expanded {
 			m.expanded[row.id] = true
-			if row.kind == rPool {
-				return m, tea.Batch(m.ensureTreeCmd(row.host, row.pool.Name), m.treeEnsure())
+			switch row.kind {
+			case rPool:
+				// the sweep is the chevron census: one command answers
+				// "which datasets here have snapshots" for the whole pool
+				return m, tea.Batch(m.ensureTreeCmd(row.host, row.pool.Name),
+					m.ensurePoolSweep(row.host, row.pool.Name), m.treeEnsure())
+			case rDataset:
+				// → opens everything; t is the per-view opt-out
+				delete(m.snapsFolded, row.id)
+				return m, tea.Batch(m.ensureSnapsCmd(row.host, row.ds.Name), m.treeEnsure())
 			}
 		}
 	case "left", "h":
@@ -510,7 +539,7 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.filter != "" {
 			break
 		}
-		if cmd, ok := m.toggleSnapsShown(); ok {
+		if cmd, ok := m.toggleSnapsFold(); ok {
 			return m, cmd
 		}
 	case " ", "shift+down":
@@ -559,7 +588,9 @@ func (m *Model) treeKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if row := m.treeSelected(); row.kind == rDataset || row.kind == rSnap {
 				m.ExpandFor(row.host.name, row.ds.Name)
 				if row.kind == rSnap {
-					m.snapsShown[treeDsID(row.host, row.ds.Name)] = true
+					// landing on a snap: its dataset expands with snaps showing
+					delete(m.snapsFolded, treeDsID(row.host, row.ds.Name))
+					m.expanded[treeDsID(row.host, row.ds.Name)] = true
 				}
 			}
 			m.filter = ""

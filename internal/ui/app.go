@@ -36,7 +36,7 @@ type Model struct {
 	// tree screen state
 	treeSel      string          // row id: "≡", "h:<host>", "p:<host>\x00<pool>", or "<host>\x00<dataset>[@snap]"
 	expanded     map[string]bool // same id scheme (families: "f:<host>\x00<ds>\x00<label>")
-	snapsShown   map[string]bool // dataset row ids whose snapshots are t-toggled into the tree
+	snapsFolded  map[string]bool // dataset ids whose snapshots t folded out of an expanded view
 	treeSortUsed bool
 
 	// reclaim marks, fleet-wide: row ids — "host\x00ds" (whole dataset),
@@ -122,7 +122,7 @@ func New(specs []HostSpec, multiHost bool, tuning Tuning) *Model {
 		tuning:       tuning,
 		treeSortUsed: true,
 		expanded:     map[string]bool{},
-		snapsShown:   map[string]bool{},
+		snapsFolded:  map[string]bool{},
 		marks:        map[string]bool{},
 		acks:         map[string]string{},
 		destroyErrs:  map[string]string{},
@@ -603,22 +603,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				k.h.dsTreesPend[k.pool] = true
 				cmds = append(cmds, fetchDatasets(k.h, k.pool))
 			}
+			// the chevron census stays fresh too (TTL-gated inside)
+			cmds = append(cmds, m.ensurePoolSweep(k.h, k.pool))
 		}
 		for k := range need {
 			if !k.h.fg && now.After(k.h.dsDue) {
 				k.h.dsDue = now.Add(m.tuning.BgPools)
 			}
 		}
-		// t-toggled snapshot lists stay live too — the toggle set is the
-		// user's explicit interest, so it bounds the refresh cost
-		for id := range m.snapsShown {
+		// unfolded snapshot lists stay live — expansion is the user's
+		// explicit interest, so it bounds the refresh cost
+		for id := range m.expanded {
 			i := strings.IndexByte(id, 0)
-			if i < 0 {
-				continue
+			if i < 0 || strings.HasPrefix(id, "p:") || strings.HasPrefix(id, "f:") ||
+				m.snapsFolded[id] {
+				continue // pool/family ids, or snaps folded out of view
 			}
 			h, ds := m.hostByName(id[:i]), id[i+1:]
 			if h == nil || h.conn == connDown || h.dsSnapsPend[ds] {
 				continue
+			}
+			if s, ok := h.dsSnaps[ds]; !ok || len(s) == 0 {
+				continue // nothing on screen; discovery is the sweep's job
 			}
 			h.dsSnapsPend[ds] = true
 			cmds = append(cmds, fetchSnaps(h, ds))

@@ -162,7 +162,7 @@ func rowReclaim(r destroyRow) (int64, bool) {
 // the data a live lookup needs); idle/queued rows keep refreshing while
 // late dry-runs land.
 func (m *Model) destroySigma() string {
-	runnable, done, objTotal, objDone := 0, 0, 0, 0
+	runnable, done, failed, objTotal, objDone := 0, 0, 0, 0, 0
 	var total, freed int64
 	exact, started := true, false
 	for i := range m.destroyRows {
@@ -188,10 +188,13 @@ func (m *Model) destroySigma() string {
 		} else {
 			exact = false
 		}
-		if r.status == destroyDone {
+		switch r.status {
+		case destroyDone:
 			done++
 			objDone += objs
 			freed += r.reclaim
+		case destroyFailed:
+			failed++
 		}
 	}
 	ge := ""
@@ -208,8 +211,13 @@ func (m *Model) destroySigma() string {
 		if !exact {
 			geT = "≥"
 		}
-		return fmt.Sprintf("reclaimed %d/%d (%s/%s%s)", objDone, objTotal,
+		s := fmt.Sprintf("reclaimed %d/%d (%s/%s%s)", objDone, objTotal,
 			zfs.NiceBytes(freed), geT, zfs.NiceBytes(total))
+		if failed > 0 {
+			// the reason the ledger is stuck, named in the title
+			s += " · " + styBad.Render(fmt.Sprintf("%d failed", failed))
+		}
+		return s
 	}
 }
 
@@ -354,17 +362,21 @@ func (m *Model) applyDestroyDone(msg destroyDoneMsg) tea.Cmd {
 		m.markGen++
 		delete(m.destroyErrs, destroyKey(h, ds))
 		// a destroyed dataset takes its cached snapshot lists (and its
-		// subtree's) and any t-toggles with it
+		// subtree's), expansion state, and t-folds with it
 		if !isSnaps {
 			for name := range h.dsSnaps {
 				if name == ds || strings.HasPrefix(name, ds+"/") {
 					delete(h.dsSnaps, name)
 				}
 			}
-			for id := range m.snapsShown {
-				pfx := treeDsID(h, ds)
-				if id == pfx || strings.HasPrefix(id, pfx+"/") {
-					delete(m.snapsShown, id)
+			pfx := treeDsID(h, ds)
+			fpfx := "f:" + pfx
+			for _, mp := range []map[string]bool{m.expanded, m.snapsFolded} {
+				for id := range mp {
+					if id == pfx || strings.HasPrefix(id, pfx+"/") ||
+						strings.HasPrefix(id, fpfx+"\x00") || strings.HasPrefix(id, fpfx+"/") {
+						delete(mp, id)
+					}
 				}
 			}
 		}

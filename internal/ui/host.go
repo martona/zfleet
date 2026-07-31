@@ -125,10 +125,14 @@ type hostState struct {
 	dsPropsPend map[string]bool
 	dryCache    map[string]*dryResult
 
-	// fleet-sweep bookkeeping (the / filter): per-pool recursive snapshot
-	// fetches, TTL-cached so retyping narrows in memory
+	// pool-sweep bookkeeping (the / filter and the chevron census):
+	// per-pool recursive snapshot fetches, TTL-cached so retyping narrows
+	// in memory. snapSwept marks pools whose snapshot universe has landed
+	// at least once — from then on, absence from dsSnaps means "none",
+	// and chevrons are truthful
 	snapSweepAt   map[string]time.Time
 	snapSweepPend map[string]bool
+	snapSwept     map[string]bool
 
 	// the ack ledger — the ONE map the Model owns, shared by reference so
 	// severity math here can consult it
@@ -168,6 +172,7 @@ func newHostState(name, dest string, src collect.Source) *hostState {
 		dryCache:      map[string]*dryResult{},
 		snapSweepAt:   map[string]time.Time{},
 		snapSweepPend: map[string]bool{},
+		snapSwept:     map[string]bool{},
 		dryGate:       make(chan struct{}, 4),
 		ioW:           map[string]int{},
 		stripW:        map[string]int{},

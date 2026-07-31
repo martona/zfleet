@@ -542,11 +542,16 @@ func dsInspector(m *Model, h *hostState, d *zfs.Dataset, w int) []string {
 			}
 			// the toggle that replaced the old browse mode — loud on purpose
 			hint := "show snapshots in the tree"
-			if m.snapsShown[treeDsID(h, d.Name)] {
+			id := treeDsID(h, d.Name)
+			if m.expanded[id] && !m.snapsFolded[id] {
 				hint = "hide snapshots"
 			}
 			lines = append(lines, " "+keyChip("t", hint))
 		}
+	} else if _, known := h.snapState(d.Name); known {
+		// the sweep has spoken: absence from the cache means none — say
+		// so instead of implying a fetch that will never come
+		lines = append(lines, " "+styDim.Render("no snapshots"))
 	} else {
 		lines = append(lines, " "+styDim.Render("snaps …"))
 	}

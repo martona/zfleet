@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -10,10 +11,12 @@ import (
 
 func expandMark(r treeRow) string {
 	switch {
-	case !r.expandable:
-		return " "
 	case r.expanded:
 		return "▾"
+	case r.chevUnknown:
+		return "·" // snapshot census in flight: chevron not yet earned
+	case !r.expandable:
+		return " "
 	default:
 		return "▸"
 	}
@@ -205,6 +208,13 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 			// structural ancestor of a match — the path, not the prize
 			return styDim.Render(lead + used)
 		}
+		if r.snapOnly {
+			// violet chevron = only snapshots inside; a plain chevron
+			// always has datasets behind it
+			indent := rep("  ", ind+r.depth)
+			chev := expandMark(r)
+			return indent + stySnapAt.Render(chev) + lead[len(indent)+len(chev):] + dimUnit(used)
+		}
 		return lead + dimUnit(used)
 
 	case rFam:
@@ -222,7 +232,13 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 		case markCh == "*":
 			return styWarn.Render(lead + used)
 		}
-		return lead + dimUnit(used)
+		// a collapsed family is snapshot-kind and lives in the snapshot
+		// register — it must not outshine its own members. Its chevron is
+		// violet like every chevron that hides only snapshots.
+		indent := rep("  ", ind+r.depth)
+		chev := expandMark(r)
+		return indent + stySnapAt.Render(chev) + styDim.Render(markCh) + snapSigil(name, styDim) +
+			lead[len(prefix+name):] + styDim.Render(used)
 
 	case rSnap:
 		markCh := " "
@@ -243,9 +259,11 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 			return styWarn.Render(lead + used)
 		case r.hit:
 			// a filter match is the prize — full brightness among dim paths
-			return lead + dimUnit(used)
+			return prefix + snapSigil(name, lipgloss.NewStyle()) +
+				lead[len(prefix+name):] + dimUnit(used)
 		}
-		return styDim.Render(lead + used)
+		return styDim.Render(prefix) + snapSigil(name, styDim) +
+			lead[len(prefix+name):] + styDim.Render(used)
 
 	case rPending:
 		label := "collecting datasets…"
@@ -264,6 +282,18 @@ func treeRowLeft(m *Model, r treeRow, nameW int, onCur bool) string {
 // famLabel is a family row's display name: the shared prefix and the count.
 func famLabel(f *zfs.SnapFamily) string {
 	return fmt.Sprintf("@%s (%d)", f.Label(), len(f.Snaps))
+}
+
+// snapSigil renders a snapshot-kind name with its @ as the sigil — bold
+// violet, the tree's "this is snapshot-kind" mark — and the rest in the
+// row's own register. Every snap and family label starts with @, so the
+// sigil sits exactly where a type prefix would, at zero width cost.
+func snapSigil(name string, rest lipgloss.Style) string {
+	after, ok := strings.CutPrefix(name, "@")
+	if !ok {
+		return rest.Render(name) // truncated below the sigil; nothing to mark
+	}
+	return stySnapAt.Render("@") + rest.Render(after)
 }
 
 // rowWindow computes the visible slice the scroll logic would keep, so

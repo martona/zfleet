@@ -144,6 +144,11 @@ func main() {
 					if dsText, err := srcOf(host).DatasetTexts(ctx, pool); err == nil {
 						m.ApplyDatasets(host, pool, dsText)
 					}
+					// the chevron census: without it every childless dataset
+					// wears the unknown · and expanded ones sprout pending rows
+					if txt, err := srcOf(host).PoolSnapshotTexts(ctx, pool); err == nil {
+						m.ApplySweep(host, pool, txt)
+					}
 					fetched[key] = true
 				}
 				m.ExpandFor(host, path)
@@ -164,6 +169,9 @@ func main() {
 					fail("collect datasets: " + err.Error())
 				}
 				m.ApplyDatasets(host, pool, dsText)
+				if txt, err := src.PoolSnapshotTexts(ctx, pool); err == nil {
+					m.ApplySweep(host, pool, txt)
+				}
 				if !m.ShowSnaps(host, path) {
 					fail("host not found: " + item)
 				}

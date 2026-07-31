@@ -491,6 +491,32 @@ func filterMatch(name, pat string) bool {
 	return strings.Contains(name, pat)
 }
 
+// snapState is the tri-state snapshot knowledge for a dataset: (has,
+// known). A loaded list answers directly; after a pool sweep, absence
+// from the cache means "none" (the universe is known); before either,
+// nothing is known and the UI must not promise or deny snapshots.
+func (h *hostState) snapState(ds string) (has, known bool) {
+	if s, ok := h.dsSnaps[ds]; ok {
+		return len(s) > 0, true
+	}
+	if h.snapSwept[poolOf(ds)] {
+		return false, true
+	}
+	return false, false
+}
+
+// ensurePoolSweep fires one pool-recursive snapshot listing when it is
+// owed: the chevron census on pool expand, and the / filter's @-hunt.
+// TTL-gated so retyping and ticks narrow in memory.
+func (m *Model) ensurePoolSweep(h *hostState, pool string) tea.Cmd {
+	if h == nil || h.conn == connDown || h.snapSweepPend[pool] ||
+		time.Since(h.snapSweepAt[pool]) < sweepTTL {
+		return nil
+	}
+	h.snapSweepPend[pool] = true
+	return fetchSweep(h, pool)
+}
+
 // ensureFilterCmd fans out whatever the active filter is missing: every
 // live pool's dataset tree, plus the pool-recursive snapshot sweep when
 // the pattern hunts snapshots.
@@ -506,12 +532,9 @@ func (m *Model) ensureFilterCmd() tea.Cmd {
 		}
 		for _, p := range h.pools {
 			cmds = append(cmds, m.ensureTreeCmd(h, p.Name))
-			if !hasSnap || h.snapSweepPend[p.Name] ||
-				time.Since(h.snapSweepAt[p.Name]) < sweepTTL {
-				continue
+			if hasSnap {
+				cmds = append(cmds, m.ensurePoolSweep(h, p.Name))
 			}
-			h.snapSweepPend[p.Name] = true
-			cmds = append(cmds, fetchSweep(h, p.Name))
 		}
 	}
 	return tea.Batch(cmds...)
@@ -716,15 +739,27 @@ func (m *Model) ApplyProps(host, ds, text string) {
 }
 
 // ApplySweep ingests one pool's recursive snapshot listing into the
-// per-dataset cache (also used by --dump).
+// per-dataset cache (also used by --dump). The sweep is AUTHORITATIVE for
+// its pool: a cached list it no longer mentions belongs to a dataset
+// whose snapshots died outside this cache — known-empty now, or the
+// chevron would linger. Its success also marks the pool's snapshot
+// universe as known: absence from dsSnaps means "no snapshots", not
+// "never asked".
 func (m *Model) ApplySweep(host, pool, text string) {
 	h := m.hostByName(host)
 	if h == nil {
 		return
 	}
-	for ds, snaps := range zfs.ParseAllSnapshots(text) {
+	fresh := zfs.ParseAllSnapshots(text)
+	for ds := range h.dsSnaps {
+		if (ds == pool || strings.HasPrefix(ds, pool+"/")) && fresh[ds] == nil {
+			h.dsSnaps[ds] = []*zfs.Snapshot{}
+		}
+	}
+	for ds, snaps := range fresh {
 		h.dsSnaps[ds] = snaps
 	}
+	h.snapSwept[pool] = true
 	h.snapSweepAt[pool] = time.Now()
 	delete(h.snapSweepPend, pool)
 }
@@ -732,9 +767,9 @@ func (m *Model) ApplySweep(host, pool, text string) {
 // SetFilter activates the filter (dump helper).
 func (m *Model) SetFilter(pat string) { m.filter = pat }
 
-// ShowSnaps unfolds a dataset's snapshots into the tree — the `t` toggle,
-// ancestors included. A "@label" suffix also unfolds that family (dump
-// helper).
+// ShowSnaps unfolds a dataset with its snapshots visible — under
+// citizenship that is simply expansion with any t-fold cleared. A
+// "@label" suffix also unfolds that family (dump helper).
 func (m *Model) ShowSnaps(host, path string) bool {
 	h := m.hostByName(host)
 	if h == nil {
@@ -745,7 +780,7 @@ func (m *Model) ShowSnaps(host, path string) bool {
 		ds = path[:i]
 		m.expanded[treeFamID(h, ds, path[i+1:])] = true
 	}
-	m.snapsShown[treeDsID(h, ds)] = true
+	delete(m.snapsFolded, treeDsID(h, ds))
 	m.ExpandFor(host, ds)
 	return true
 }
