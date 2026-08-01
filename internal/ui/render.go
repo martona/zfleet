@@ -91,6 +91,23 @@ func frame(m *Model) string {
 		return "─" + seg + rep("─", w-1-lipgloss.Width(seg))
 	}
 
+	// stamp splices the version into the right end of a composed top-border
+	// line (plain text at this point — safe to truncate). Dim: provenance,
+	// not news.
+	stamp := func(line string) string {
+		if m.version == "" {
+			return line
+		}
+		// plain single-width runes at this point, so a rune slice cuts
+		// clean (truncate() is a middle-elide — wrong shape here)
+		r := []rune(line)
+		keep := len(r) - lipgloss.Width(m.version) - 4 // " ver ─┐" tail
+		if keep < 16 {                                 // degenerate widths: titles win
+			return line
+		}
+		return string(r[:keep]) + " " + styDim.Render(m.version) + " ─┐"
+	}
+
 	// full-width presentation: the tree with the cursor on the overview row
 	if m.mode == modePools && m.treeSelected().kind == rOverview {
 		inner := m.w - 2
@@ -104,7 +121,7 @@ func frame(m *Model) string {
 		lines := overviewPane(m, inner, contentH)
 		m.rightOverflow = false
 		var b strings.Builder
-		b.WriteString("┌" + title(heading, inner) + "┐\n")
+		b.WriteString(stamp("┌"+title(heading, inner)+"┐") + "\n")
 		for i := 0; i < contentH; i++ {
 			l := ""
 			if i < len(lines) {
@@ -194,7 +211,7 @@ func frame(m *Model) string {
 	right, m.panelScroll, m.rightOverflow = scrollWindow(right, m.panelScroll, contentH)
 
 	var b strings.Builder
-	b.WriteString("┌" + title(leftTitle, leftW) + "┬" + title(rightTitle, rightW) + "┐\n")
+	b.WriteString(stamp("┌"+title(leftTitle, leftW)+"┬"+title(rightTitle, rightW)+"┐") + "\n")
 	for i := 0; i < contentH; i++ {
 		l, r := "", ""
 		if i < len(left) {

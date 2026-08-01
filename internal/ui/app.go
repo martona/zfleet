@@ -30,8 +30,9 @@ type Model struct {
 	hosts     []*hostState
 	multiHost bool // any remote registered: host rows appear everywhere
 
-	w, h int
-	mode int
+	w, h    int
+	mode    int
+	version string // "zfleet X.Y.Z" corner stamp; "" = no stamp (tests)
 
 	// tree screen state
 	treeSel      string          // row id: "≡", "h:<host>", "p:<host>\x00<pool>", or "<host>\x00<dataset>[@snap]"
@@ -115,6 +116,12 @@ const settleDelay = 100 * time.Millisecond
 func (m *Model) dirtyData() { m.rowsOK, m.groupsOK = false, false }
 
 type settleMsg struct{}
+
+// SetVersion sets the corner stamp: "vX.Y.Z" renders as "zfleet X.Y.Z" in the
+// top border. Called by main before the program runs.
+func (m *Model) SetVersion(v string) {
+	m.version = "zfleet " + strings.TrimPrefix(v, "v")
+}
 
 func New(specs []HostSpec, multiHost bool, tuning Tuning) *Model {
 	m := &Model{

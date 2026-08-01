@@ -57,6 +57,7 @@ func main() {
 	readConfig()
 	specs, multi := resolveHosts(replays, hostFlags, *noDedupe)
 	m := ui.New(specs, multi, cfgTuning)
+	m.SetVersion(version)
 	m.SetAckFile(*ackFile)
 
 	// hostFor resolves an optional "host:" prefix on dump arguments,
