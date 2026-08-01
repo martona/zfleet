@@ -2,6 +2,7 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/martona/zfleet/internal/zfs"
 )
@@ -51,5 +52,77 @@ func TestBankDirty(t *testing.T) {
 		[]zfs.TxgRow{{Txg: 17, Birth: 16_100_000_000, State: "C", NDirty: 4}}, 4)
 	if len(win) != 4 || win[0] != 7 || win[1] != 9 || win[2] != -1 || win[3] != 4 {
 		t.Fatalf("capped bank = %v, want [7 9 -1 4]", win)
+	}
+}
+
+// A txg paints every window its life spans — the zeus lesson: a saturated
+// pool cutting 35s txgs must render as a plateau, not one spike per txg
+// and sync-time void.
+func TestBankDirtySpan(t *testing.T) {
+	// born at 1s, 3s open + 4s sync → alive through 8s: windows 0–4
+	long := []zfs.TxgRow{{Txg: 20, Birth: 1_000_000_000, State: "C", NDirty: 8,
+		OTime: 3_000_000_000, STime: 4_000_000_000}}
+	win, lastTxg, lastIdx := bankDirty(nil, 0, 0, long, perfDirtyWinCap)
+	if len(win) != 5 {
+		t.Fatalf("span bank = %v, want 5 windows", win)
+	}
+	for i, v := range win {
+		if v != 8 {
+			t.Fatalf("span bank = %v, want 8 across the whole life (window %d)", win, i)
+		}
+	}
+
+	// the pipelined successor: born at 5s while 20 still synced, commits
+	// at 11s — overlap max-merges under the heavier txg, the tail extends
+	next := []zfs.TxgRow{{Txg: 21, Birth: 5_000_000_000, State: "C", NDirty: 6,
+		OTime: 4_000_000_000, STime: 2_000_000_000}}
+	win, _, _ = bankDirty(win, lastTxg, lastIdx, next, perfDirtyWinCap)
+	if len(win) != 6 || win[3] != 8 || win[4] != 8 || win[5] != 6 {
+		t.Fatalf("overlap bank = %v, want [8 8 8 8 8 6]", win)
+	}
+}
+
+// The live right edge: dirtyDisplay extends the banked window to now and
+// paints in-flight txgs at the newest committed peak — the chart marches
+// at wall speed instead of holding its breath for a 35s txg.
+func TestDirtyDisplay(t *testing.T) {
+	m := &Model{}
+	ring := []zfs.TxgRow{
+		{Txg: 30, Birth: 1_000_000_000, State: "C", NDirty: 5},
+		{Txg: 31, Birth: 1_500_000_000, State: "O"}, // alive since 1.5s
+	}
+	m.perf.dirtyWin, m.perf.dirtyTxg, m.perf.dirtyIdx = bankDirty(nil, 0, 0, ring, perfDirtyWinCap)
+	m.perf.txgs = ring
+	m.perf.liveNS, m.perf.liveAt = 9_000_000_000, time.Now() // "now" ≈ 9s → window 4
+
+	out := m.dirtyDisplay()
+	if len(out) != 5 {
+		t.Fatalf("display = %v, want 5 windows out to now", out)
+	}
+	for i, v := range out {
+		if v != 5 {
+			t.Fatalf("display = %v, want provisional 5 across the open txg's span (window %d)", out, i)
+		}
+	}
+	if len(m.perf.dirtyWin) != 1 {
+		t.Fatalf("banked window mutated by render: %v", m.perf.dirtyWin)
+	}
+
+	// nothing alive: the extension stays blank
+	m.perf.txgs = ring[:1]
+	out = m.dirtyDisplay()
+	if len(out) != 5 || out[4] != -1 {
+		t.Fatalf("display = %v, want blank tail with no txg in flight", out)
+	}
+
+	// idle: an alive txg with a zero-dirty last commit still dots the edge
+	// (0 = baseline dot; -1 = blank — in-flight must read as calm, not absent)
+	m.perf.txgs = []zfs.TxgRow{
+		{Txg: 40, Birth: 1_000_000_000, State: "C", NDirty: 0},
+		{Txg: 41, Birth: 7_000_000_000, State: "O"},
+	}
+	out = m.dirtyDisplay()
+	if out[4] != 0 || out[3] != 0 {
+		t.Fatalf("display = %v, want 0-dots from the alive txg's birth to now", out)
 	}
 }

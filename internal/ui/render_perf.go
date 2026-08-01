@@ -249,7 +249,7 @@ func arcLines(h *hostState, rollHit string, memThrottle float64, noGrow bool, li
 func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate float64, lines *[]string) {
 	// prefix 8 aligns the chart's left edge with the "a" of "avg" above it
 	const chartH, prefixW, scaleLbl = 4, 8, 17
-	win := m.perf.dirtyWin
+	win := m.dirtyDisplay()
 	chartW := w - prefixW - scaleLbl
 	if chartW < 20 {
 		chartW = 20

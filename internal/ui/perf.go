@@ -29,6 +29,8 @@ type perfState struct {
 	dirtyWin  []int64      // dirty chart: peak ndirty per wall-clock window
 	dirtyTxg  int64        // newest txg banked into dirtyWin
 	dirtyIdx  int64        // window index of dirtyWin's last entry
+	liveNS    int64        // newest commit timestamp seen (ns since boot)
+	liveAt    time.Time    // wall clock when liveNS was first observed
 	dmu       map[string]int64
 	dmuPrev   map[string]int64
 	dmuAt     time.Time
@@ -52,31 +54,53 @@ const perfLatHistLen = 30
 const perfDirtyWinCap = 512
 
 // bankDirty folds newly committed txgs into the dirty chart's TIME-indexed
-// ring: one slot per collector interval of wall clock, bucketed by txg
-// birth timestamp, value = PEAK ndirty among the window's txgs (peak, not
-// mean — the delay/max waterlines are thresholds, and a window crosses one
-// iff some real txg did; averaging could hide a throttle hit). -1 marks a
-// window no txg committed in (renders blank). Dedupe is by txg number: the
-// kernel ring overlaps almost entirely between reads, and its ~100 rows of
-// birth times backfill the axis on the first read, so the chart starts
-// warm. A txg storm collapses into few columns instead of racing the
-// chart; idle heartbeats march at the same wall speed as everything else.
+// ring: one slot per collector interval of wall clock, value = PEAK ndirty
+// among the txgs ALIVE in that window (peak, not mean — the delay/max
+// waterlines are thresholds, and a window crosses one iff some real txg
+// did; averaging could hide a throttle hit). A txg paints EVERY window its
+// life spans — birth through the four phase durations to commit — max-
+// merged where lives overlap. Attributing a txg to its birth window alone
+// rendered a saturated pool as void: zeus at 54G dirty and 2000 delays/s
+// drew one spike per 35s txg and blank sync time between (round 36). -1
+// marks a window with nothing in flight (renders blank); idle heartbeat
+// txgs paint their ~5s open span, so calm reads as a sparse dotted march.
+// Dedupe is by txg number: the kernel ring overlaps almost entirely
+// between reads, and its ~100 rows backfill the axis on the first read,
+// so the chart starts warm.
 func bankDirty(win []int64, lastTxg, lastIdx int64, ring []zfs.TxgRow, max int) ([]int64, int64, int64) {
 	winNS := int64(perfInterval / time.Nanosecond)
 	for _, r := range ring {
 		if r.State != "C" || r.Txg <= lastTxg {
 			continue
 		}
-		idx := r.Birth / winNS
-		switch {
-		case len(win) == 0 || idx > lastIdx:
-			for g := int64(0); len(win) > 0 && g < idx-lastIdx-1 && g < int64(max); g++ {
-				win = append(win, -1)
+		start := r.Birth / winNS
+		end := (r.Birth + r.OTime + r.QTime + r.WTime + r.STime) / winNS
+		if end < start { // never paint backward on clock weirdness
+			end = start
+		}
+		if len(win) == 0 {
+			win = append(win, -1)
+			lastIdx = start
+		}
+		// materialize windows out to the commit; blanks beyond the cap are
+		// pointless (the trim below erases them), so a huge clock jump just
+		// snaps the axis forward
+		for g := int64(0); lastIdx < end && g < int64(max); g++ {
+			win = append(win, -1)
+			lastIdx++
+		}
+		if lastIdx < end {
+			lastIdx = end
+		}
+		// paint the whole life, max-merged over whatever windows still exist
+		for idx := start; idx <= end; idx++ {
+			pos := len(win) - 1 - int(lastIdx-idx)
+			if pos < 0 || pos >= len(win) {
+				continue
 			}
-			win = append(win, r.NDirty)
-			lastIdx = idx
-		case r.NDirty > win[len(win)-1]:
-			win[len(win)-1] = r.NDirty
+			if win[pos] < r.NDirty {
+				win[pos] = r.NDirty
+			}
 		}
 		lastTxg = r.Txg
 	}
@@ -141,6 +165,19 @@ func (m *Model) applyPerf(msg perfMsg) {
 	m.perf.txgs = zfs.ParseTxgs(msg.txgs)
 	m.perf.dirtyWin, m.perf.dirtyTxg, m.perf.dirtyIdx = bankDirty(
 		m.perf.dirtyWin, m.perf.dirtyTxg, m.perf.dirtyIdx, m.perf.txgs, perfDirtyWinCap)
+	// the boot-clock anchor for the live right edge: the newest commit
+	// timestamp, wall-stamped when FIRST observed (a commit is discovered
+	// at most one tick after it happens, so liveNS+since(liveAt) tracks
+	// boot time within ~2s — re-stamping on every read would freeze the
+	// axis between commits instead)
+	for _, r := range m.perf.txgs {
+		if r.State != "C" {
+			continue
+		}
+		if t := r.Birth + r.OTime + r.QTime + r.WTime + r.STime; t > m.perf.liveNS {
+			m.perf.liveNS, m.perf.liveAt = t, time.Now()
+		}
+	}
 	m.perf.dmuPrev, m.perf.dmu = m.perf.dmu, zfs.ParseKstatMap(msg.dmuTx)
 	m.perf.dmuPrevAt, m.perf.dmuAt = m.perf.dmuAt, time.Now()
 	m.perf.zilPrev, m.perf.zil = m.perf.zil, zfs.ParseKstatMap(msg.zil)
@@ -148,6 +185,61 @@ func (m *Model) applyPerf(msg perfMsg) {
 		m.perf.params = p
 	}
 	m.perf.have = true
+}
+
+// dirtyDisplay is what the dirty chart renders: the banked (committed,
+// authoritative) window extended to NOW, with the in-flight txgs' spans
+// painted provisionally at the newest committed peak. The kernel only
+// stamps ndirty at sync completion (verified in fixtures — O/S rows read
+// 0), so a live per-pool magnitude does not exist; the last commit is the
+// stand-in, near-exact in steady state and an underpaint during storm
+// onset until the first monster commits and pops the truth in (Marton
+// accepted the pop-in — the right edge marching at wall speed is the
+// point). Render-side copy only: dirtyWin stays pure so commits always
+// overwrite the guess.
+func (m *Model) dirtyDisplay() []int64 {
+	win := m.perf.dirtyWin
+	if m.perf.liveNS == 0 || len(m.perf.txgs) == 0 || len(win) == 0 {
+		return win
+	}
+	winNS := int64(perfInterval / time.Nanosecond)
+	nowIdx := (m.perf.liveNS + int64(time.Since(m.perf.liveAt))) / winNS
+	ext := nowIdx - m.perf.dirtyIdx
+	if ext < 0 {
+		ext = 0
+	}
+	if ext > perfDirtyWinCap {
+		ext = perfDirtyWinCap
+	}
+	out := make([]int64, len(win), len(win)+int(ext))
+	copy(out, win)
+	for i := int64(0); i < ext; i++ {
+		out = append(out, -1)
+	}
+	var prov int64 // newest committed ndirty: the ring is txg-ordered
+	for _, r := range m.perf.txgs {
+		if r.State == "C" {
+			prov = r.NDirty
+		}
+	}
+	for _, r := range m.perf.txgs {
+		if r.State == "C" {
+			continue
+		}
+		for idx := r.Birth / winNS; idx <= nowIdx; idx++ {
+			pos := len(out) - 1 - int(nowIdx-idx)
+			if pos < 0 || pos >= len(out) {
+				continue
+			}
+			if out[pos] < prov {
+				out[pos] = prov // -1 < 0: an idle alive txg still dots the edge
+			}
+		}
+	}
+	if len(out) > perfDirtyWinCap {
+		out = out[len(out)-perfDirtyWinCap:]
+	}
+	return out
 }
 
 // perfLatRings returns the armed pool's device rings from the host-owned
