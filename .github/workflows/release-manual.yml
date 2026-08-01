@@ -1,0 +1,60 @@
+name: Release (manual)
+
+# Operator-triggered release. You supply the version (zfleet has no version-file to
+# read); the workflow builds, packages, and creates release v<version> at the current
+# commit, creating the tag if it doesn't exist. Defaults to a draft; tick `publish`
+# to release immediately. Delegates the heavy lifting to _release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version X.Y.Z (no v prefix), e.g. 0.1.0'
+        required: true
+        type: string
+      publish:
+        description: 'Publish immediately (otherwise creates a draft)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
+      draft: ${{ steps.compute.outputs.draft }}
+    steps:
+      - id: compute
+        shell: bash
+        run: |
+          ver="${{ inputs.version }}"
+          ver="${ver#v}"   # tolerate a pasted leading v
+          if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].+)?$ ]]; then
+            echo "::error::Version '$ver' must be <major>.<minor>.<patch> (optional -suffix), e.g. 0.1.0"; exit 1
+          fi
+          if [[ "${{ inputs.publish }}" == "true" ]]; then draft="false"; else draft="true"; fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=$ver tag=v$ver draft=$draft"
+
+  pipeline:
+    name: Build, package, publish
+    needs: resolve
+    uses: ./.github/workflows/_release.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      tag: ${{ needs.resolve.outputs.tag }}
+      draft: ${{ needs.resolve.outputs.draft == 'true' }}
+    secrets: inherit

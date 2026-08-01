@@ -1,0 +1,44 @@
+# nfpm config: one static zfleet binary -> .deb, .rpm, and Arch .pkg.tar.zst.
+# https://nfpm.goreleaser.com/configuration/
+#
+# Driven by scripts/package_linux.sh. The ${...} tokens below are NOT expanded by
+# nfpm (its contents[].src glob arrives literal) -- the script renders them with
+# envsubst/perl into a concrete config before invoking `nfpm package` per packager.
+#
+# Dependencies: zfleet is built CGO_ENABLED=0, so the binary is FULLY STATIC --
+# no dynamic libraries at all, not even libc. There is therefore NO `depends:` /
+# `overrides:` block: one package installs and runs on any glibc/musl distro of
+# the matching arch. zfs/ssh/smartctl are runtime tools it invokes, not link-time
+# dependencies, and remote-only use needs none of them locally -- so they are
+# deliberately not declared.
+
+name: zfleet
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+section: admin
+priority: optional
+maintainer: Marton Anka <martona@users.noreply.github.com>
+vendor: Marton Anka
+homepage: https://github.com/martona/zfleet
+license: MIT
+description: |
+  zfleet -- a terminal UI for a fleet of ZFS hosts.
+  Browses pools, datasets, snapshots, and drives across many hosts over ssh:
+  live IO sparklines, SMART health with per-check ledgers, fleet-wide snapshot
+  search, and multi-select snapshot/dataset destroy priced by dry-run. Read-only
+  by default; the two write operations (zfs destroy, zpool clear) each show the
+  verbatim command before asking for confirmation.
+
+contents:
+  - src: ${ZFLEET_BINARY}
+    dst: /usr/bin/zfleet
+    file_info:
+      mode: 0755
+  # License/provenance docs. The script stages whatever it has (LICENSE/README
+  # always; THIRD-PARTY-LICENSES.txt when the release pipeline has generated it)
+  # into ${ZFLEET_DOCDIR} and we glob it.
+  - src: ${ZFLEET_DOCDIR}/*
+    dst: /usr/share/doc/zfleet/
+    file_info:
+      mode: 0644

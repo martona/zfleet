@@ -1,0 +1,74 @@
+name: Release (tag)
+
+# Auto-fires when a vX.Y.Z tag is pushed. The tag IS the version (baked into the
+# binary via -ldflags). Always drafts; publish via the UI's Publish button or
+# `gh release edit --draft=false <tag>`. Heavy lifting is in _release.yml.
+#
+# No-ops when a release already exists for the tag: publishing a draft (e.g. one the
+# manual workflow built) creates the tag, which re-fires this push-triggered workflow;
+# the guard skips that duplicate build. A fresh tag push has no release yet, so it
+# builds normally -- so either flow works.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
+      exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - id: compute
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          ver="${tag#v}"
+          # Accept vMAJOR.MINOR.PATCH with an optional -prerelease / +build suffix.
+          if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].+)?$ ]]; then
+            echo "::error::Tag '$tag' must be v<major>.<minor>.<patch> (optional -suffix), e.g. v0.1.0"; exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=$ver tag=$tag"
+
+      - id: check
+        # A release already existing for this tag means the tag was just created by
+        # publishing a draft (which the manual workflow already built) -- skip the
+        # duplicate build. `gh release view` exits non-zero when no release exists, so a
+        # fresh tag push proceeds; the if/else keeps the step green either way.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.compute.outputs.tag }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release $tag already exists -- skipping duplicate build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  pipeline:
+    name: Build, package, publish
+    needs: resolve
+    if: needs.resolve.outputs.exists != 'true'
+    uses: ./.github/workflows/_release.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      tag: ${{ needs.resolve.outputs.tag }}
+      draft: true
+    secrets: inherit

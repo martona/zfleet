@@ -1,0 +1,59 @@
+name: CI
+
+# Every push/PR: format, vet, test, cross-build both release arches, and smoke
+# the nfpm packaging so config rot surfaces before a release run does.
+# The whole testdata/ tree is gitignored (live captures carry hostnames/serials),
+# so CI runs the fixture-less suite: parser tests t.Skip, the pure-logic and UI
+# state-machine tests run in full. Verified green with testdata absent.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Test + build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        run: gofmt -l . | tee /dev/stderr | wc -l | grep -qx 0
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: Cross-build (amd64 + arm64, static)
+        env:
+          GOOS: linux
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "dist/zfleet-linux-$arch" ./cmd/zfleet
+          done
+          file dist/zfleet-linux-amd64 | grep -q "statically linked" || {
+            echo "::error::not statically linked" >&2; exit 1; }
+
+      - name: Package smoke (nfpm deb/rpm/arch)
+        run: |
+          bash scripts/package_linux.sh --version 0.0.0 \
+            --binary dist/zfleet-linux-amd64 --arch amd64 --outdir dist/pkg-smoke
+          ls -la dist/pkg-smoke/

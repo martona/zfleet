@@ -24,8 +24,12 @@ type multiFlag []string
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
+// version is stamped by the release pipeline via -ldflags "-X main.version=vX.Y.Z".
+var version = "dev"
+
 func main() {
 	var replays, hostFlags multiFlag
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Var(&replays, "replay", "fixture `dir` (or name=dir, repeatable) instead of live collection")
 	flag.Var(&hostFlags, "host", "ssh `destination` of a remote host (repeatable; adds to zfleet.conf's [hosts])")
 	noDedupe := flag.Bool("no-dedupe", false, "keep entries matching the local hostname as ssh hosts (testing)")
@@ -44,6 +48,11 @@ func main() {
 	ackPopup := flag.Bool("ack-popup", false, "open the acknowledge popup in --dump")
 	destroyPopup := flag.Bool("destroy-popup", false, "open the F8 destroy popup over the --mark selection in --dump")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("zfleet " + version)
+		return
+	}
 
 	readConfig()
 	specs, multi := resolveHosts(replays, hostFlags, *noDedupe)
