@@ -92,10 +92,53 @@ func splitPoolID(m *Model, id string) (*hostState, string, bool) {
 // walk is the whole cost of a key.
 func (m *Model) treeRows() []treeRow {
 	if !m.rowsOK {
+		prev := m.rowsCache
 		m.rowsCache = m.buildRows()
 		m.rowsOK = true
+		m.rescueCursor(prev)
 	}
 	return m.rowsCache
+}
+
+// rescueCursor: a refresh that yanks the cursor's row out of the tree — a
+// snapshot rotation, a rename sweep landing, sweep results superseding a
+// stale list — must not dump the cursor on the overview. Same doctrine as
+// F8's restCursor, applied at row-rebuild time so EVERY data path is
+// covered: walk UP the previous row list from the old cursor position to
+// the nearest row that still exists. Keys never trip it — they either
+// keep the id alive or set treeSel deliberately to a row the rebuild
+// contains.
+func (m *Model) rescueCursor(prev []treeRow) {
+	if len(prev) == 0 || m.treeSel == "" || m.treeSel == overviewID {
+		return
+	}
+	if strings.HasPrefix(m.treeSel, "w:") {
+		return // pending rows resolve to their parent via treeIdx — by design
+	}
+	alive := make(map[string]bool, len(m.rowsCache))
+	for _, r := range m.rowsCache {
+		alive[r.id] = true
+	}
+	if alive[m.treeSel] {
+		return
+	}
+	cur := -1
+	for i := range prev {
+		if prev[i].id == m.treeSel {
+			cur = i
+			break
+		}
+	}
+	if cur < 0 {
+		return // cursor wasn't in the old rows either — nothing to walk from
+	}
+	for j := cur - 1; j >= 0; j-- {
+		if alive[prev[j].id] {
+			m.treeSel = prev[j].id
+			m.cursorMovedAt = time.Now()
+			return
+		}
+	}
 }
 
 func (m *Model) buildRows() []treeRow {

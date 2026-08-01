@@ -127,6 +127,47 @@ func TestCitizenOrderAndFold(t *testing.T) {
 	findRow(t, m, treeDsID(h, "p/a@s1"))
 }
 
+// A background refresh that yanks the cursor's row (snapshot rename sweep,
+// rotation) rescues the cursor to the nearest surviving row above — the
+// F8 restCursor doctrine applied to every data path.
+func TestRescueCursor(t *testing.T) {
+	m, h := citizenFixture()
+
+	// prime the cache, then park the cursor on p/a's newest snap.
+	// row order under p/a: b, c, d, @s1, @s2
+	m.rowsOK = false
+	m.treeRows()
+	m.treeSel = treeDsID(h, "p/a@s2")
+	m.rowsOK = false
+	m.treeRows() // cursor row alive: rescue must not move it
+	if m.treeSel != treeDsID(h, "p/a@s2") {
+		t.Fatalf("cursor moved with its row still alive: %q", m.treeSel)
+	}
+
+	// a migrate script renames every snapshot out from under the cursor:
+	// both old snap rows die, nearest survivor above is the sibling d
+	h.dsSnaps["p/a"] = []*zfs.Snapshot{
+		{Name: "p/a@n1", Snap: "n1", Creation: 4},
+		{Name: "p/a@n2", Snap: "n2", Creation: 5},
+	}
+	m.rowsOK = false
+	m.treeRows()
+	if m.treeSel != treeDsID(h, "p/a/d") {
+		t.Fatalf("cursor = %q, want rescue to p/a/d (not the overview)", m.treeSel)
+	}
+
+	// only the cursor's own snap dies: the surviving snap above wins
+	m.treeSel = treeDsID(h, "p/a@n2")
+	m.rowsOK = false
+	m.treeRows()
+	h.dsSnaps["p/a"] = h.dsSnaps["p/a"][:1] // n2 gone, n1 survives
+	m.rowsOK = false
+	m.treeRows()
+	if m.treeSel != treeDsID(h, "p/a@n1") {
+		t.Fatalf("cursor = %q, want the surviving @n1", m.treeSel)
+	}
+}
+
 func TestCitizenFoldChildless(t *testing.T) {
 	m, h := citizenFixture()
 	// b is childless with one snap: folding its open view collapses it
