@@ -10,7 +10,17 @@ import "strings"
 type ObjsetIO struct {
 	Reads, Writes   int64 // ops, cumulative
 	NRead, NWritten int64 // bytes, cumulative
-	ZilCommits      int64 // cumulative; 0 on kmods without the field
+	// zil counters, cumulative. ZilSeen marks kmods that carry per-dataset
+	// zil stats (2.2+) — the pool panel sums THESE for its zil line; the
+	// host-global zil kstat is only a fallback, because captioning it
+	// per-pool once blamed an idle recv pool for a NIC's rasdaemon fsync
+	// storm two pools away (zeus, round 36).
+	ZilSeen    bool
+	ZilCommits int64
+	ZilNormalB int64 // itx bytes written to data vdevs
+	ZilSlogB   int64 // itx bytes written to a slog
+	ZilNormalC int64 // itx count, normal class
+	ZilSlogC   int64 // itx count, slog class
 }
 
 // ParseObjsets parses any concatenation of objset kstat files. Each file
@@ -48,7 +58,15 @@ func ParseObjsets(text string) map[string]ObjsetIO {
 		case "nwritten":
 			o.NWritten = v
 		case "zil_commit_count":
-			o.ZilCommits = v
+			o.ZilCommits, o.ZilSeen = v, true
+		case "zil_itx_metaslab_normal_bytes":
+			o.ZilNormalB = v
+		case "zil_itx_metaslab_slog_bytes":
+			o.ZilSlogB = v
+		case "zil_itx_metaslab_normal_count":
+			o.ZilNormalC = v
+		case "zil_itx_metaslab_slog_count":
+			o.ZilSlogC = v
 		default:
 			continue
 		}

@@ -126,3 +126,52 @@ func TestDirtyDisplay(t *testing.T) {
 		t.Fatalf("display = %v, want 0-dots from the alive txg's birth to now", out)
 	}
 }
+
+// The zil line is the pool's own datasets' truth — the zeus lesson's other
+// half: the host-global kstat pinned a rasdaemon fsync storm on rpool onto
+// an innocent recv pool. poolZil must not leak across pools (nor onto
+// prefix cousins) and must name the top committer.
+func TestPoolZil(t *testing.T) {
+	h := newHostState("h", "", nil)
+	h.applyObjsets(map[string]zfs.ObjsetIO{
+		"rust":       {ZilSeen: true},
+		"rust/a":     {ZilSeen: true, ZilCommits: 100, ZilNormalB: 1000, ZilNormalC: 50},
+		"rustic/x":   {ZilSeen: true, ZilCommits: 500},
+		"rpool/root": {ZilSeen: true, ZilCommits: 10000},
+	})
+	h.objsetAt = time.Now().Add(-2 * time.Second) // age the sample: dt ≈ 2s
+	h.applyObjsets(map[string]zfs.ObjsetIO{
+		"rust":       {ZilSeen: true},
+		"rust/a":     {ZilSeen: true, ZilCommits: 300, ZilNormalB: 3000, ZilNormalC: 60},
+		"rustic/x":   {ZilSeen: true, ZilCommits: 700},
+		"rpool/root": {ZilSeen: true, ZilCommits: 14000},
+	})
+
+	pz := h.poolZil("rust")
+	if !pz.ok {
+		t.Fatal("objset zil stats present but poolZil reports not-ok")
+	}
+	// rust/a: 200 commits over ~2s ≈ 100/s; rustic/* and rpool/* must not leak in
+	if pz.commits < 80 || pz.commits > 120 {
+		t.Fatalf("commits/s = %.1f, want ~100 (cross-pool or prefix leak?)", pz.commits)
+	}
+	if pz.topDS != "rust/a" {
+		t.Fatalf("top committer = %q, want rust/a", pz.topDS)
+	}
+	if pz.normC != 60 {
+		t.Fatalf("normC = %d, want 60 (rust's own itx only)", pz.normC)
+	}
+	if pz.normB < 800 || pz.normB > 1200 {
+		t.Fatalf("normB = %d B/s, want ~1000", pz.normB)
+	}
+
+	// a host whose kmod lacks objset zil stats refuses: render falls back
+	// to the global kstat with the honest "host-wide" caption
+	h2 := newHostState("h2", "", nil)
+	h2.applyObjsets(map[string]zfs.ObjsetIO{"p/a": {Writes: 1}})
+	h2.objsetAt = time.Now().Add(-2 * time.Second)
+	h2.applyObjsets(map[string]zfs.ObjsetIO{"p/a": {Writes: 2}})
+	if h2.poolZil("p").ok {
+		t.Fatal("poolZil claimed ok without objset zil stats")
+	}
+}

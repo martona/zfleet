@@ -54,7 +54,14 @@ func poolPerfLines(m *Model, h *hostState, p *zfs.Pool, w int) (banner, engine [
 	io := h.io[p.Name]
 
 	if armed {
-		commitRate := m.perfRate(m.perf.zil, m.perf.zilPrev, "zil_commit_count")
+		// zil truth is the pool's own datasets' objset counters; the global
+		// kstat (pre-2.2 kmods only) can't tell pools apart and once pinned
+		// a NIC's rasdaemon fsync storm on an innocent recv pool
+		pz := h.poolZil(p.Name)
+		commitRate := pz.commits
+		if !pz.ok {
+			commitRate = m.perfRate(m.perf.zil, m.perf.zilPrev, "zil_commit_count")
+		}
 		slogLatW := int64(-1)
 		if hasSlog {
 			for _, v := range p.Class("logs").Vdevs {
@@ -141,17 +148,35 @@ func poolPerfLines(m *Model, h *hostState, p *zfs.Pool, w int) (banner, engine [
 			styDim.Render(" · quiesce ") + zfs.NiceNS(sum.QAvg) +
 			styDim.Render(" · wait ") + zfs.NiceNS(sum.WAvg) +
 			styDim.Render(" · sync ") + zfs.NiceNS(sum.SAvg))
-		slogCnt := m.perf.zil["zil_itx_metaslab_slog_count"]
-		normalCnt := m.perf.zil["zil_itx_metaslab_normal_count"]
-		slogBps := m.perfRate(m.perf.zil, m.perf.zilPrev, "zil_itx_metaslab_slog_bytes")
-		normBps := m.perfRate(m.perf.zil, m.perf.zilPrev, "zil_itx_metaslab_normal_bytes")
+		var slogCnt, normalCnt, slogBps, normBps int64
+		top, scope := "", ""
+		if pz.ok {
+			slogCnt, normalCnt = pz.slogC, pz.normC
+			slogBps, normBps = pz.slogB, pz.normB
+			if pz.topCommits >= 1 && pz.topDS != "" {
+				// name the committer — the whole point of per-dataset truth
+				label := strings.TrimPrefix(pz.topDS, p.Name+"/")
+				if pz.topDS == p.Name {
+					label = "/"
+				}
+				top = fmt.Sprintf(" (%s %.0f/s)", label, pz.topCommits)
+			}
+		} else {
+			slogCnt = m.perf.zil["zil_itx_metaslab_slog_count"]
+			normalCnt = m.perf.zil["zil_itx_metaslab_normal_count"]
+			slogBps = int64(m.perfRate(m.perf.zil, m.perf.zilPrev, "zil_itx_metaslab_slog_bytes"))
+			normBps = int64(m.perfRate(m.perf.zil, m.perf.zilPrev, "zil_itx_metaslab_normal_bytes"))
+			scope = styDim.Render(" · host-wide") // old kmod: unattributable
+		}
 		slogTxt := fmt.Sprintf("slog %s/s (%s itx) · normal %s/s (%s itx)",
-			zfs.NiceBytes(int64(slogBps)), zfs.NiceCount(slogCnt),
-			zfs.NiceBytes(int64(normBps)), zfs.NiceCount(normalCnt))
-		if hasSlog && slogCnt == 0 {
+			zfs.NiceBytes(slogBps), zfs.NiceCount(slogCnt),
+			zfs.NiceBytes(normBps), zfs.NiceCount(normalCnt))
+		// only a finding when syncs actually happened and bypassed the
+		// slog — on a pool with no sync traffic it is trivially true
+		if hasSlog && slogCnt == 0 && normalCnt > 0 {
 			slogTxt += styWarn.Render(" (slog unused)")
 		}
-		add(" " + styBold.Render("zil") + fmt.Sprintf("   %.1f commits/s · ", commitRate) + slogTxt)
+		add(" " + styBold.Render("zil") + fmt.Sprintf("   %.1f commits/s", commitRate) + top + " · " + slogTxt + scope)
 		if m.perf.err != "" {
 			add(" " + styWarn.Render("collector: "+truncate(m.perf.err, w-14)))
 		}

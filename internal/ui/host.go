@@ -101,6 +101,8 @@ type hostState struct {
 	dsIOHist   map[string][]zfs.IORates
 	objsetPrev map[string]zfs.ObjsetIO
 	objsetAt   time.Time
+	dsZil      map[string]zilRates // per-dataset zil rates (kmods with zil objset stats)
+	hasObjZil  bool                // objsets carry zil counters → pool zil lines are honest
 
 	// disk layer: inventory, alias/block maps for vdev resolution, and
 	// the hwmon chip→disk joins that turn chip readings into drive temps
@@ -494,8 +496,16 @@ func (h *hostState) poolGeometry(pool string) (width, parity, ashift int, ok boo
 func (h *hostState) applyObjsets(cur map[string]zfs.ObjsetIO) {
 	now := time.Now()
 	dt := now.Sub(h.objsetAt).Seconds()
+	h.hasObjZil = false
+	for _, c := range cur {
+		if c.ZilSeen {
+			h.hasObjZil = true
+			break
+		}
+	}
 	if h.objsetPrev != nil && dt > 0.2 {
 		rates := map[string]zfs.IORates{}
+		zil := map[string]zilRates{}
 		for name, c := range cur {
 			p, ok := h.objsetPrev[name]
 			if !ok {
@@ -514,6 +524,13 @@ func (h *hostState) applyObjsets(cur map[string]zfs.ObjsetIO) {
 				WBw:  clamp(c.NWritten - p.NWritten),
 			}
 			rates[name] = r
+			if c.ZilSeen {
+				zil[name] = zilRates{
+					Commits: float64(clamp(c.ZilCommits - p.ZilCommits)),
+					NormB:   clamp(c.ZilNormalB - p.ZilNormalB),
+					SlogB:   clamp(c.ZilSlogB - p.ZilSlogB),
+				}
+			}
 			hist := append(h.dsIOHist[name], r)
 			if len(hist) > dsIOHistLen {
 				hist = hist[len(hist)-dsIOHistLen:]
@@ -521,9 +538,63 @@ func (h *hostState) applyObjsets(cur map[string]zfs.ObjsetIO) {
 			h.dsIOHist[name] = hist
 		}
 		h.dsIO = rates
+		h.dsZil = zil
 	}
 	h.objsetPrev = cur
 	h.objsetAt = now
+}
+
+// zilRates is one dataset's zil activity per second, from objset deltas.
+type zilRates struct {
+	Commits float64
+	NormB   int64 // bytes/s landing on data vdevs
+	SlogB   int64 // bytes/s landing on a slog
+}
+
+// poolZilStats is a pool's zil truth, summed from its own datasets — never
+// the host-global kstat, which once blamed an idle recv pool for another
+// pool's fsync storm.
+type poolZilStats struct {
+	ok           bool // objset zil stats present and rates computed
+	commits      float64
+	normB, slogB int64 // bytes/s by class
+	normC, slogC int64 // itx counts, cumulative
+	topDS        string
+	topCommits   float64
+}
+
+// poolZil sums zil rates and cumulative itx counts over the pool's own
+// datasets and names the busiest committer.
+func (h *hostState) poolZil(pool string) poolZilStats {
+	var s poolZilStats
+	if !h.hasObjZil {
+		return s
+	}
+	// ok on field presence alone: before the first rate window (and in
+	// replay dumps, which can't space samples) pool-scoped zeros are more
+	// honest than falling back to the unattributable host-wide numbers
+	s.ok = true
+	in := func(name string) bool {
+		return name == pool || strings.HasPrefix(name, pool+"/")
+	}
+	for name, z := range h.dsZil {
+		if !in(name) {
+			continue
+		}
+		s.commits += z.Commits
+		s.normB += z.NormB
+		s.slogB += z.SlogB
+		if z.Commits > s.topCommits {
+			s.topDS, s.topCommits = name, z.Commits
+		}
+	}
+	for name, c := range h.objsetPrev {
+		if in(name) {
+			s.normC += c.ZilNormalC
+			s.slogC += c.ZilSlogC
+		}
+	}
+	return s
 }
 
 // subtreeIO sums current rates and tail-aligned history over d and all its
