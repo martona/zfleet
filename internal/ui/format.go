@@ -21,7 +21,11 @@ var (
 	styWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	styWarnInv = lipgloss.NewStyle().Reverse(true).Foreground(lipgloss.Color("11")) // the scream band
 	styBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	styDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	// dim is a direct 256-color gray (#8a8a8a), NOT ANSI 8: half the UI's
+	// hierarchy lives in dim, and terminals disagree wildly on slot 8 —
+	// Apple Terminal's dark profiles put it near-invisible on their
+	// background. Same carve-out logic as the snapshot sigil below.
+	styDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	styBold    = lipgloss.NewStyle().Bold(true)
 	styInv     = lipgloss.NewStyle().Reverse(true) // the mc cursor bar
 	styBar     = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
