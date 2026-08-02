@@ -27,14 +27,14 @@ over ssh — pools, datasets, snapshots, drives, and their live IO, in one tree.
 
 ## Safety model
 
-zfleet is read-only by default. Exactly two write operations exist:
+zfleet is read-only by default. Two write operations exist:
 
-- `zfs destroy` — only through the F8 popup, only on rows you  marked, priced
+- `zfs destroy`: only through the F8 popup, only on rows you  marked, priced
   by a `destroy -n` dry-run first, and the popup shows the
-  verbatim command before you confirm. No `-f`, ever: busy mounts fail. 
+  command before you confirm. No `-f`: busy mounts fail. 
   Subtrees containing the running system (`/`, `/boot`) are blocked.
 - `zpool clear` — only through the warnings inbox, where the line you
-  confirm is the verbatim command.
+  confirm is the command executed.
 
 Everything else — every list, status, iostat, SMART probe — is a read.
 Without passwordless sudo on a host, both write paths and SMART data
