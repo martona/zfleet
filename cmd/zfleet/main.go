@@ -361,7 +361,7 @@ func resolveHosts(replays, hostFlags multiFlag, noDedupe bool) ([]ui.HostSpec, b
 }
 
 // The one config file: ~/.config/zfleet/zfleet.conf, INI-style sections
-// (the zfsrecvd/stevedore idiom — brackets, plain lines, # comments).
+// (the stevedore idiom — brackets, plain lines, # comments).
 // Loaded once by readConfig into these; ack.conf stays its own file (an
 // append-only ledger, not configuration).
 var (

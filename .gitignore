@@ -2,3 +2,5 @@ dist/
 *.exe
 /testdata/
 /.claude/
+/scripts/capture.sh
+/scripts/deploy.sh
