@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -435,8 +434,7 @@ func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate floa
 // windowed latency and lifetime odometers on one row per vdev, drills
 // beneath the alarmed. Columns pop into fixed slots by priority as the
 // panel widens — narrow panels lose columns, never evidence: an alarmed
-// or straggling leaf's drill always carries the full latency
-// decomposition.
+// leaf's drill always carries the full latency decomposition.
 func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	type ent struct {
 		depth     int
@@ -450,10 +448,9 @@ func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		tempHot   int
 		read      string
 		written   string
-		note      string
-		alarmed   bool
-		straggler bool
-		drill     []string
+		note    string
+		alarmed bool
+		drill   []string
 	}
 	var ents []ent
 	var walk func(v *zfs.Vdev, classPrefix string, depth int)
@@ -545,55 +542,22 @@ func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		}
 	}
 
-	// straggler: a leaf ≥3× the median of the pool's leaves (R or W total,
-	// ≥50 window ops behind it) lights up — self-relative, no absolute ms
-	var medRs, medWs []int64
-	for _, e := range ents {
-		if !e.leaf {
-			continue
-		}
-		avg, _, n := m.latWindow(e.key)
-		if n == 0 {
-			continue
-		}
-		if avg.TotalR >= 0 && avg.ROps >= 50 {
-			medRs = append(medRs, avg.TotalR)
-		}
-		if avg.TotalW >= 0 && avg.WOps >= 50 {
-			medWs = append(medWs, avg.TotalW)
-		}
-	}
-	medR, medW := median(medRs), median(medWs)
+	// the drill carries the full latency decomposition whenever the
+	// leaf is drilled at all — columns may be cut, evidence never is
 	for i := range ents {
 		e := &ents[i]
-		if !e.leaf {
+		if !e.leaf || !(e.alarmed || m.verboseDrives) {
 			continue
 		}
 		avg, peakW, n := m.latWindow(e.key)
 		if n == 0 {
 			continue
 		}
-		if len(medRs) >= 3 && medR > 0 && avg.ROps >= 50 && avg.TotalR >= 3*medR {
-			e.straggler = true
-		}
-		if len(medWs) >= 3 && medW > 0 && avg.WOps >= 50 && avg.TotalW >= 3*medW {
-			e.straggler = true
-		}
-		// the drill carries the full latency decomposition whenever the
-		// leaf is drilled at all — columns may be cut, evidence never is
-		if e.straggler || e.alarmed || m.verboseDrives {
-			line := " " + rep("  ", e.depth+1) + "  " + styDim.Render("latency  ") +
-				"w-total " + zfs.NiceNS(avg.TotalW) +
-				styDim.Render(" · disk ") + zfs.NiceNS(avg.DiskW) +
-				styDim.Render(" · queue ") + zfs.NiceNS(avg.QueueW()) +
-				styDim.Render(" · peak ") + zfs.NiceNS(peakW)
-			if e.straggler {
-				line = " " + rep("  ", e.depth+1) + "  " + styWarn.Render("latency  "+
-					"w-total "+zfs.NiceNS(avg.TotalW)+" · disk "+zfs.NiceNS(avg.DiskW)+
-					" · queue "+zfs.NiceNS(avg.QueueW())+" · peak "+zfs.NiceNS(peakW))
-			}
-			e.drill = append(e.drill, line)
-		}
+		e.drill = append(e.drill, " "+rep("  ", e.depth+1)+"  "+styDim.Render("latency  ")+
+			"w-total "+zfs.NiceNS(avg.TotalW)+
+			styDim.Render(" · disk ")+zfs.NiceNS(avg.DiskW)+
+			styDim.Render(" · queue ")+zfs.NiceNS(avg.QueueW())+
+			styDim.Render(" · peak ")+zfs.NiceNS(peakW))
 	}
 
 	// ── responsive columns: fixed spatial slots, presence by priority ──
@@ -679,22 +643,12 @@ func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		avg, peakW, _ := m.latWindow(e.key)
 		lat := func(ns int64) string {
 			cell := padL(zfs.NiceNS(ns), 9)
-			switch {
-			case e.straggler:
-				return styWarn.Render(cell)
-			case ns < 0:
+			if ns < 0 {
 				return styDim.Render(cell)
 			}
 			return cell
 		}
 		ind := rep("  ", e.depth)
-		if e.straggler {
-			if len(ind) >= 2 {
-				ind = ind[:len(ind)-2] + "! "
-			} else {
-				ind = "! "
-			}
-		}
 		avail := nameW - len(ind)
 		base := truncate(e.display, avail)
 		tag := ""
@@ -764,13 +718,4 @@ func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 		lines = append(lines, e.drill...)
 	}
 	return lines
-}
-
-func median(vals []int64) int64 {
-	if len(vals) == 0 {
-		return 0
-	}
-	s := append([]int64(nil), vals...)
-	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
-	return s[len(s)/2]
 }
