@@ -20,8 +20,20 @@ type Smart struct {
 	PowerOnH   int64
 	ReadBytes  int64 // lifetime host reads, -1 unknown
 	WriteBytes int64
-	LifeUsed   int          // nvme percentage_used, -1 elsewhere
-	SparePct   int          // nvme available_spare, -1 elsewhere
+	// Seagate FARM's field-frame odometers, -1 unknown. Kept apart from
+	// the attribute pair above because the ledgers disagree: Exos
+	// firmware (SN01/SN04 observed) ships attr 242 with a frozen
+	// factory-frame offset, while FARM counts field sectors exactly.
+	FarmReadBytes  int64
+	FarmWriteBytes int64
+	// ACS device-statistics odometers (GP log 0x04), -1 unknown. On
+	// Seagates these mirror attrs 241/242 exactly — one firmware counter
+	// feeds both surfaces — so their value is drives that report no
+	// 241/242 at all.
+	DsReadBytes  int64
+	DsWriteBytes int64
+	LifeUsed       int          // nvme percentage_used, -1 elsewhere
+	SparePct       int          // nvme available_spare, -1 elsewhere
 	Checks     []SmartCheck // every check performed, canonical order
 	Warns      []string     // the warn-tier reasons, derived from Checks
 	Standby    bool         // drive was asleep; politely not woken
@@ -69,7 +81,36 @@ func ataLifetime(name string, raw int64) int64 {
 	}
 }
 
-// ParseSmart digests one `smartctl -j -a -n standby` output.
+// OdoRead is the lifetime-read odometer with the trust order applied:
+// FARM's field ledger first (the only source unaffected by the Seagate
+// factory-offset bug in attr 242), the standardized device-statistics
+// log next (fills in drives that report no 241/242), the attribute pair
+// last. Display truth only — no source disagreement is ever a warning.
+func (s Smart) OdoRead() int64 {
+	switch {
+	case s.FarmReadBytes >= 0:
+		return s.FarmReadBytes
+	case s.DsReadBytes >= 0:
+		return s.DsReadBytes
+	}
+	return s.ReadBytes
+}
+
+// OdoWrite is the lifetime-write odometer, same trust order.
+func (s Smart) OdoWrite() int64 {
+	switch {
+	case s.FarmWriteBytes >= 0:
+		return s.FarmWriteBytes
+	case s.DsWriteBytes >= 0:
+		return s.DsWriteBytes
+	}
+	return s.WriteBytes
+}
+
+// ParseSmart digests one `smartctl -j -x -n standby` output, optionally
+// followed in the same text by further JSON documents — the collectors
+// append `smartctl -j -l farm` output for Seagate drives. The decoder
+// walks the document stream, so single-document fixtures parse unchanged.
 func ParseSmart(text string) (Smart, bool) {
 	var j struct {
 		Smartctl struct {
@@ -105,13 +146,25 @@ func ParseSmart(text string) (Smart, bool) {
 				} `json:"raw"`
 			} `json:"table"`
 		} `json:"ata_smart_attributes"`
+		LogicalBlockSize int64 `json:"logical_block_size"`
+		DevStats         *struct {
+			Pages []struct {
+				Table []struct {
+					Name  string `json:"name"`
+					Value *int64 `json:"value"`
+				} `json:"table"`
+			} `json:"pages"`
+		} `json:"ata_device_statistics"`
 		GrownDefects *int64 `json:"scsi_grown_defect_list"`
 	}
-	if json.Unmarshal([]byte(text), &j) != nil {
+	dec := json.NewDecoder(strings.NewReader(text))
+	if dec.Decode(&j) != nil {
 		return Smart{}, false
 	}
 	s := Smart{TempC: -1, TempHigh: -1, TempCrit: -1,
-		PowerOnH: -1, ReadBytes: -1, WriteBytes: -1, LifeUsed: -1, SparePct: -1}
+		PowerOnH: -1, ReadBytes: -1, WriteBytes: -1,
+		FarmReadBytes: -1, FarmWriteBytes: -1,
+		DsReadBytes: -1, DsWriteBytes: -1, LifeUsed: -1, SparePct: -1}
 	// exit bit 1 = device open ok but in low-power mode (-n standby honored)
 	s.Standby = j.Smartctl.ExitStatus&2 != 0 && j.SmartStatus == nil
 	// every verdict flows through here: the check ledger is the record of
@@ -201,6 +254,55 @@ func ParseSmart(text string) (Smart, bool) {
 	if j.GrownDefects != nil {
 		check("scsi-defects", "grown defects", itoa(*j.GrownDefects),
 			warnIf(*j.GrownDefects > 0))
+	}
+	if j.DevStats != nil {
+		lbs := j.LogicalBlockSize
+		if lbs <= 0 {
+			lbs = 512
+		}
+		for _, p := range j.DevStats.Pages {
+			for _, t := range p.Table {
+				if t.Value == nil {
+					continue
+				}
+				switch t.Name {
+				case "Logical Sectors Written":
+					s.DsWriteBytes = *t.Value * lbs
+				case "Logical Sectors Read":
+					s.DsReadBytes = *t.Value * lbs
+				}
+			}
+		}
+	}
+	// trailing documents: Seagate FARM, the drive's second odometer ledger
+	for {
+		var f struct {
+			Farm *struct {
+				Info *struct {
+					LogicalSectorSize int64 `json:"logical_sector_size"`
+				} `json:"page_1_drive_information"`
+				Workload *struct {
+					Written *int64 `json:"logical_sectors_written"`
+					Read    *int64 `json:"logical_sectors_read"`
+				} `json:"page_2_workload_statistics"`
+			} `json:"seagate_farm_log"`
+		}
+		if dec.Decode(&f) != nil {
+			break
+		}
+		if f.Farm == nil || f.Farm.Workload == nil {
+			continue
+		}
+		lss := int64(512)
+		if f.Farm.Info != nil && f.Farm.Info.LogicalSectorSize > 0 {
+			lss = f.Farm.Info.LogicalSectorSize
+		}
+		if v := f.Farm.Workload.Written; v != nil {
+			s.FarmWriteBytes = *v * lss
+		}
+		if v := f.Farm.Workload.Read; v != nil {
+			s.FarmReadBytes = *v * lss
+		}
 	}
 	return s, true
 }

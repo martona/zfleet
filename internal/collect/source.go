@@ -83,8 +83,11 @@ type Source interface {
 	// and hwmon chip→device links. Best-effort.
 	DiskTexts(ctx context.Context) (aliases, sysBlock, lsblk, hwmonDev string)
 	// SmartTexts probes for passwordless sudo and, when granted, returns
-	// `smartctl -j -x -n standby` output per disk node. sudoOK reports the
-	// probe — false means the degraded no-root experience, not an error.
+	// `smartctl -j -x -n standby` output per disk node — for Seagate
+	// drives with `smartctl -j -l farm` output appended as a second JSON
+	// document in the same text (ParseSmart walks the stream). sudoOK
+	// reports the probe — false means the degraded no-root experience,
+	// not an error.
 	SmartTexts(ctx context.Context, nodes []string) (texts map[string]string, sudoOK bool)
 	Name() string
 }
@@ -232,11 +235,33 @@ func (Exec) SmartTexts(ctx context.Context, nodes []string) (map[string]string, 
 		// the device-stated thresholds the temp tinting refuses to invent
 		b, _ := exec.CommandContext(ctx, "sudo", "-n", "smartctl",
 			"-j", "-x", "-n", "standby", "/dev/"+n).Output()
-		if len(b) > 0 {
-			out[n] = string(b)
+		if len(b) == 0 {
+			continue
 		}
+		text := string(b)
+		if farmCandidate(text) {
+			fb, _ := exec.CommandContext(ctx, "sudo", "-n", "smartctl",
+				"-j", "-l", "farm", "-n", "standby", "/dev/"+n).Output()
+			if len(fb) > 0 {
+				text += "\n" + string(fb)
+			}
+		}
+		out[n] = text
 	}
 	return out, true
+}
+
+// farmCandidate sniffs a smartctl -x output for a Seagate identity: only
+// Seagates keep a FARM log, and everyone else is spared the extra
+// roundtrip. A text sniff, not a parse — this side of the wire ships
+// texts and lets the zfs package do the reading. A false positive costs
+// one no-op smartctl call; ParseSmart ignores a document with no
+// seagate_farm_log key.
+func farmCandidate(text string) bool {
+	return strings.Contains(text, `"model_name": "ST`) ||
+		strings.Contains(text, `"model_name":"ST`) ||
+		strings.Contains(text, "Seagate") ||
+		strings.Contains(text, "SEAGATE")
 }
 
 func (Exec) DestroyDryRun(ctx context.Context, target string) (string, error) {

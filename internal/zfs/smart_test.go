@@ -118,3 +118,46 @@ func TestParseSmartVerdicts(t *testing.T) {
 		t.Error("garbage accepted")
 	}
 }
+
+func TestSmartOdometers(t *testing.T) {
+	// SN01-shaped Exos: attr 242 (and devstat, which mirrors it — same
+	// firmware counter) carries a factory offset; FARM has field truth
+	base := `{"smart_status":{"passed":true},"logical_block_size":512,
+		"ata_smart_attributes":{"table":[
+		{"id":241,"name":"Total_LBAs_Written","raw":{"value":1000000}},
+		{"id":242,"name":"Total_LBAs_Read","raw":{"value":84886080}}]},
+		"ata_device_statistics":{"pages":[{"table":[
+		{"name":"Logical Sectors Written","value":1000123},
+		{"name":"Logical Sectors Read","value":84886203},
+		{"name":"Power-on Hours"}]}]}}`
+	farm := `{"seagate_farm_log":{
+		"page_1_drive_information":{"logical_sector_size":512},
+		"page_2_workload_statistics":{"logical_sectors_written":1000000,"logical_sectors_read":1000000}}}`
+	s, ok := ParseSmart(base + "\n" + farm)
+	if !ok || s.FarmReadBytes != 512000000 || s.FarmWriteBytes != 512000000 {
+		t.Fatalf("farm odometers = %d/%d", s.FarmReadBytes, s.FarmWriteBytes)
+	}
+	if s.DsReadBytes != 84886203*512 || s.DsWriteBytes != 1000123*512 {
+		t.Fatalf("devstat odometers = %d/%d", s.DsReadBytes, s.DsWriteBytes)
+	}
+	// trust order tier 1: FARM wins where present
+	if s.OdoRead() != 512000000 || s.OdoWrite() != 512000000 {
+		t.Errorf("odo = %d/%d, want farm values", s.OdoRead(), s.OdoWrite())
+	}
+	// FARM informs display only — it must never mint a check
+	for _, c := range s.Checks {
+		if c.ID != "overall" {
+			t.Errorf("unexpected check %+v", c)
+		}
+	}
+	// tier 2: no farm document — devstat over the attribute pair
+	if s, _ := ParseSmart(base); s.OdoRead() != 84886203*512 || s.OdoWrite() != 1000123*512 {
+		t.Errorf("devstat tier = %d/%d", s.OdoRead(), s.OdoWrite())
+	}
+	// tier 3: attributes alone
+	attrs := `{"logical_block_size":512,"ata_smart_attributes":{"table":[
+		{"id":242,"name":"Total_LBAs_Read","raw":{"value":84886080}}]}}`
+	if s, _ := ParseSmart(attrs); s.OdoRead() != 84886080*512 || s.OdoWrite() != -1 {
+		t.Errorf("attr tier = %d/%d", s.OdoRead(), s.OdoWrite())
+	}
+}

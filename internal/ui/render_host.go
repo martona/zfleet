@@ -281,7 +281,7 @@ func hostInspector(m *Model, h *hostState, w int) []string {
 		row := "  " + padR(d.Node, nodeW+2) + padR(model, modelW+1) +
 			dimUnit(padL(zfs.NiceBytes(d.Size), 7)) + temp
 		if s, ok := h.smart[d.Node]; ok {
-			row += styDim.Render("  r") + rw(s.ReadBytes) + styDim.Render(" w") + rw(s.WriteBytes)
+			row += styDim.Render("  r") + rw(s.OdoRead()) + styDim.Render(" w") + rw(s.OdoWrite())
 			eff := h.diskSmartSev(d.Node)
 			verdict := "  " + styDim.Render("ok")
 			switch {

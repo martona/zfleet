@@ -489,11 +489,11 @@ func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 					}
 				}
 				if s, ok := h.smart[d.Node]; ok {
-					if s.ReadBytes >= 0 {
-						e.read = zfs.NiceBytes(s.ReadBytes)
+					if v := s.OdoRead(); v >= 0 {
+						e.read = zfs.NiceBytes(v)
 					}
-					if s.WriteBytes >= 0 {
-						e.written = zfs.NiceBytes(s.WriteBytes)
+					if v := s.OdoWrite(); v >= 0 {
+						e.written = zfs.NiceBytes(v)
 					}
 					switch h.diskSmartSev(d.Node) {
 					case sevErr:

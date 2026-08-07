@@ -246,9 +246,16 @@ func (s Ssh) SmartTexts(ctx context.Context, nodes []string) (map[string]string,
 		// keep stdout even on nonzero exits — smartctl flags logged errors
 		// in its exit code while the JSON is complete
 		text, _ := s.run(ctx, "sudo -n smartctl -j -x -n standby /dev/"+quote(n))
-		if len(text) > 0 {
-			out[n] = text
+		if len(text) == 0 {
+			continue
 		}
+		if farmCandidate(text) {
+			ft, _ := s.run(ctx, "sudo -n smartctl -j -l farm -n standby /dev/"+quote(n))
+			if len(ft) > 0 {
+				text += "\n" + ft
+			}
+		}
+		out[n] = text
 	}
 	return out, true
 }
