@@ -32,11 +32,11 @@ type Smart struct {
 	// 241/242 at all.
 	DsReadBytes  int64
 	DsWriteBytes int64
-	LifeUsed       int          // nvme percentage_used, -1 elsewhere
-	SparePct       int          // nvme available_spare, -1 elsewhere
-	Checks     []SmartCheck // every check performed, canonical order
-	Warns      []string     // the warn-tier reasons, derived from Checks
-	Standby    bool         // drive was asleep; politely not woken
+	LifeUsed     int          // nvme percentage_used, -1 elsewhere
+	SparePct     int          // nvme available_spare, -1 elsewhere
+	Checks       []SmartCheck // every check performed, canonical order
+	Warns        []string     // the warn-tier reasons, derived from Checks
+	Standby      bool         // drive was asleep; politely not woken
 }
 
 // SmartCheck is one health check the tool performed on a drive: a stable

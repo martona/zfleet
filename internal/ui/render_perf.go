@@ -437,17 +437,17 @@ func dirtyChartLines(m *Model, w int, dirtyMax, delayBytes int64, delayRate floa
 // leaf's drill always carries the full latency decomposition.
 func poolTable(m *Model, h *hostState, p *zfs.Pool, w int) []string {
 	type ent struct {
-		depth     int
-		display   string
-		sizeTag   string // vdev rows: "8× 18.2T", rides in the name cell
-		key       string
-		leaf      bool
-		verdict   string
-		vsty      lipgloss.Style
-		temp      string
-		tempHot   int
-		read      string
-		written   string
+		depth   int
+		display string
+		sizeTag string // vdev rows: "8× 18.2T", rides in the name cell
+		key     string
+		leaf    bool
+		verdict string
+		vsty    lipgloss.Style
+		temp    string
+		tempHot int
+		read    string
+		written string
 		note    string
 		alarmed bool
 		drill   []string
